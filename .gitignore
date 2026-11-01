@@ -1,1 +1,13 @@
 .env
+.env.local
+server/.env
+web/.env
+server/.env.local
+web/.env.local
+node_modules/
+.tooling/
+dist/
+build/
+*.tsbuildinfo
+web/dist/
+.DS_Store

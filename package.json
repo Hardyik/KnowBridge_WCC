@@ -1,0 +1,15 @@
+{
+  "name": "knowbridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "KnowBridge — AI-assisted knowledge handover platform (Fallen Crows, Round 2)",
+  "workspaces": [
+    "shared",
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  }
+}
