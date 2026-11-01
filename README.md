@@ -21,7 +21,7 @@ web/        React + TypeScript (Vite) — judge-facing UI
 server/     Express + TypeScript REST API (auth, ingestion, Groq extraction)
 shared/     Shared domain types + zod schemas (@knowbridge/shared)
 docs/       Supabase schema, architecture & data flow, demo script
-demo-data/  Synthetic demo set: generated documents + demo-repo contents
+demo-data/  Synthetic handover documents for the SafeSense demo project
 scripts/    Demo data generator
 ```
 
@@ -50,9 +50,10 @@ recipient account with a different role view, acknowledge.
    ```
    npm run dev -w web   # -> http://localhost:5173
    ```
-4. **Demo repo**: create a fresh public GitHub repository, copy the contents of
-   `demo-data/demo-repo/` into it (the `issues-and-commits/` files describe the
-   issues and commits to post), then connect it in the web UI.
+4. **Demo repo**: connect the public repository `Hardyik/SafeSense` in the web
+   UI (it is read-only; the connector snapshots the README and recent commits).
+   The synthetic handover documents describing that project are in
+   `demo-data/documents/`.
 
 ## Deployment
 
@@ -66,7 +67,8 @@ recipient account with a different role view, acknowledge.
   roles server-side on every request (defence in depth).
 - GitHub tokens are used at connect time only and never stored.
 - AI output is treated as *claims*: every claim stores its evidence; claims
-  without a verbatim source quote are stored as `unsupported`, never as facts;
-  contradictory sources are flagged `conflicting` for reviewer resolution.
+  without a quote are `unsupported`, claims whose quote cannot be found
+  verbatim in the source are `needs_review`, and contradictory statements
+  about the same subject are flagged `conflicting` for reviewer resolution.
 - Recipients only ever see approved, non-redacted, role-scoped claims; the
   acknowledgement is recorded and audited.

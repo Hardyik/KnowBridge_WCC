@@ -1,22 +1,31 @@
-Payments Platform — Ops Runbook (excerpt)
+SafeSense — Ops Runbook (excerpt)
 
-Section: Deployment
-The adapter service deploys through the payments pipeline with the
-profile "adapter-prod". Rolling restart takes about four minutes; do not
-run migration reconciliation jobs during the restart window.
-Deployment owner for this profile: Aarav Mehta.
+Section: Backend deployment
+The Flask API runs on the university VM behind the campus network. Deploy
+by pulling the Backend folder, reinstalling requirements.txt, importing
+schema.sql (or the newest migration) and restarting the service.
+Deployment owner for the VM: Meera Iyer.
+
+Section: Mobile release
+Build the release APK with the API base URL baked in:
+
+    flutter build apk --release --dart-define=API_BASE_URL=http://<LAN-IP>:5000
+
+The manifest allows cleartext LAN traffic, so the phone and the VM must be
+on the same network. Release owner: Priya Sharma.
 
 Section: Credentials
-Sandbox and production vendor keys live in the payments secrets manager
-under "gateway/sandbox" and "gateway/production". The legacy TF-Bridge
-credential set is revoked and must not be reused.
+Database credentials and JWT_SECRET live in Backend/.env and must never be
+committed. The old Firebase storage bucket is still reachable — its
+service account key was never revoked after the prototype was retired.
 
-Section: Known issues
-Vendor webhook retries double-count refunds when the adapter is slow to
-acknowledge. Workaround until the patch: enable idempotency guard flags
-on refund endpoints.
+Section: Rollout status
+The flood hazard model rollout is pending and has not been released to
+users. Only hazard_best.pt and hazard_fire_building_best.pt are approved
+for the pilot; flood_best.pt still needs a second accuracy pass on the
+labelled flood images collected in February.
 
 Section: Missing
-The run of TF-Bridge reconciliation jobs is undocumented — nobody on the
-current team knows whether these still fire on the legacy scheduler.
-Marked as an open question for the incoming engineer.
+Nobody documented how the risk-zone polygons were generated, and the
+labelled dataset used to train the three models is not stored with the
+repository. Treat both as open questions for the incoming engineer.

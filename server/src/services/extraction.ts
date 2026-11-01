@@ -12,6 +12,7 @@
 import {
   ExtractedClaim,
   ExtractionResultSummary,
+  OWNER_UNCONFIRMED,
 } from '@knowbridge/shared';
 import { z } from 'zod';
 import { serviceClient, Tables } from '../db.js';
@@ -100,10 +101,11 @@ export async function runExtraction(
         continue;
       }
 
-      // Conflict: contradicts an existing same-category claim.
-      const conflict = existingList.find(
-        (e) => e.category === claim.category && contradictory(e.text, claim.text),
-      );
+      // Conflict: contradicts an existing claim about the same subject. The
+      // model often files the same fact under `task` in one source and
+      // `other`/`decision` in another, so state-bearing categories are
+      // compared with each other rather than requiring an exact category hit.
+      const conflict = existingList.find((e) => contradictoryClaims(e, claim));
       const statusFinal: 'supported' | 'needs_review' | 'conflicting' | 'unsupported' = conflict
         ? 'conflicting'
         : status;
@@ -120,7 +122,9 @@ export async function runExtraction(
           category: claim.category,
           text,
           reasoning: claim.reasoning ?? null,
-          owner_text: claim.owner_text ?? null,
+          // A decision with no named owner is exactly the ownership gap the
+          // handover must surface; mark it literally instead of leaving blank.
+          owner_text: claim.owner_text ?? (claim.category === 'decision' ? OWNER_UNCONFIRMED : null),
           status: statusFinal,
           confidence: 0.5,
         })
@@ -187,6 +191,20 @@ function similar(a: string, b: string): number {
 export function quoteVerbatimIn(text: string, quote: string): boolean {
   const norm = (s: string) => s.toLowerCase().replace(/\s+/g, ' ').trim();
   return norm(text).includes(norm(quote));
+}
+
+/** Categories whose wording carries a completion/state meaning worth comparing. */
+function sameStateCategory(a: string, b: string): boolean {
+  const stateBearing = new Set(['task', 'decision', 'other', 'setup']);
+  return a === b || (stateBearing.has(a) && stateBearing.has(b));
+}
+
+/** Does claim `b` contradict claim `a`? The one place that decision is made. */
+export function contradictoryClaims(
+  a: { category: string; text: string },
+  b: { category: string; text: string },
+): boolean {
+  return sameStateCategory(a.category, b.category) && contradictory(a.text, b.text);
 }
 
 /** True when same subject is described with opposite state words. */

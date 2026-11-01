@@ -57,13 +57,18 @@ interface MapNodeProps {
   actions?: React.ReactNode;
 }
 
+/** One owner line for every surface: names the owner, or flags the gap. */
+export function OwnerLine({ owner }: { owner: string | null }) {
+  if (!owner) return null;
+  return (
+    <div className="ownerline">
+      {owner === OWNER_UNCONFIRMED ? `⚠ ${OWNER_UNCONFIRMED}` : `Owner: ${owner}`}
+    </div>
+  );
+}
+
 export function MapNode({ claim, onOpen, actions }: MapNodeProps) {
-  const ownerLine =
-    claim.category === 'owner' || claim.category === 'contact'
-      ? claim.owner_text
-        ? `Owner: ${claim.owner_text}`
-        : `⚠ ${OWNER_UNCONFIRMED}`
-      : null;
+  const showsOwner = claim.category === 'owner' || claim.category === 'contact';
   return (
     <div className="card map-node" onClick={() => onOpen(claim)}>
       <div className="row" style={{ gap: 6, flex: 'none' }}>
@@ -72,7 +77,7 @@ export function MapNode({ claim, onOpen, actions }: MapNodeProps) {
       </div>
       <div style={{ marginTop: 8 }}>{claim.text}</div>
       {claim.reasoning && <div className="reasoning">Why: {claim.reasoning}</div>}
-      {ownerLine && <div className="ownerline">{ownerLine}</div>}
+      <OwnerLine owner={claim.owner_text ?? (showsOwner ? OWNER_UNCONFIRMED : null)} />
       {actions && (
         <div className="row" style={{ flex: 'none', marginTop: 8 }} onClick={(e) => e.stopPropagation()}>
           {actions}
