@@ -13,7 +13,7 @@ Express API (Node + TS)
    |                       section-anchored) / TXT+MD chunker
    |-- github connector:   read-only snapshot at connect time
    |                       (README, docs/*, open issues, recent commits)
-   |-- extraction service: Groq (llama-3.3-70b, JSON mode, temperature 0)
+   |-- extraction service: Groq (gpt-oss-120b, JSON mode, temperature 0)
    |                       -> strict zod validation -> claims + evidence
    |                       -> dedup + conflict detection -> Supabase
    |-- handover service:   versioned drafts, reviewer edits, approval,
