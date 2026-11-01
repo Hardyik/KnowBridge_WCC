@@ -14,7 +14,7 @@ import {
 } from '@knowbridge/shared';
 import { get, post, ApiError } from '../api';
 import { Header } from './ProjectsScreen';
-import { EvidenceList, StatusBadge, CATEGORY_LABEL } from '../components/ClaimNodes';
+import { EvidenceList, OwnerLine, StatusBadge } from '../components/ClaimNodes';
 
 interface RecipientClaim extends Omit<ClaimWithEvidence, 'status'> {
   review_status: 'verified' | 'unverified';
@@ -170,7 +170,7 @@ export default function RecipientViewScreen() {
                     </div>
                     <div style={{ marginTop: 8 }}>{c.text}</div>
                     {c.reasoning && <div className="reasoning">Why: {c.reasoning}</div>}
-                    {c.owner_text && <div className="ownerline">Owner: {c.owner_text}</div>}
+                    <OwnerLine owner={c.owner_text} />
                     <EvidenceList evidence={c.evidence} />
                   </div>
                 ))}

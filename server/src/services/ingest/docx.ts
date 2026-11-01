@@ -1,65 +1,29 @@
 /**
- * DOCX ingestion. Preserves top-level structure: each ".." style heading
- * starts a new piece so evidence can anchor to sections of the document.
+ * DOCX ingestion. Mammoth gives us HTML; h1/h2 become markdown headings and
+ * paragraphs become blocks, then the shared heading-aware chunker splits it
+ * into section-anchored pieces so evidence can point at
+ * "status.docx — Rollout status".
  */
 import * as mammoth from 'mammoth';
 import { IngestPiece } from './pdf.js';
+import { textToPieces } from './text.js';
 
 export async function docxToPieces(buffer: Buffer): Promise<IngestPiece[]> {
   const { value: html } = await mammoth.convertToHtml({ buffer });
-  // Split into sections on h1/h2 headings.
-  const blocks = html.split(/(?=<(h1|h2)\b)/i);
-  const pieces: IngestPiece[] = [];
-  let idx = 0;
-  let currentLabel = 'section 1';
-  let currentBuf: string[] = [];
-  let headings = 0;
-
-  for (const block of blocks) {
-    const isHeading = /^<(h1|h2)\b/i.test(block);
-    const title = isHeading ? stripTags(block).slice(0, 80) : null;
-    if (isHeading && currentBuf.some((b) => b.trim())) {
-      const text = stripTags(currentBuf.join(' ')).replace(/\s+/g, ' ').trim();
-      if (text) {
-        pieces.push({
-          idx: idx++,
-          label: `${currentLabel} — ${truncate(currentLabel === 'section 1' ? 'introduction' : title ?? currentLabel)}`,
-          location: `section:${headings}`,
-          text,
-        });
-      }
-    }
-    if (isHeading) {
-      headings += 1;
-      currentLabel = title ? truncate(title) : `section ${headings}`;
-      currentBuf = [];
-    }
-    currentBuf.push(isHeading && title ? '' : stripTags(block));
-  }
-  const tail = stripTags(currentBuf.join(' ')).replace(/\s+/g, ' ').trim();
-  if (tail) {
-    pieces.push({ idx: idx++, label: currentLabel, location: `section:${headings}`, text: tail });
-  }
-  if (pieces.length === 0) {
-    const all = stripTags(html).replace(/\s+/g, ' ').trim();
-    if (all) pieces.push({ idx: 0, label: 'document', location: 'section:0', text: all });
-  }
-  for (let i = 0; i < pieces.length; i++) {
-    if (!pieces[i].label) pieces[i].label = `section ${i + 1}`;
-  }
-  return pieces;
+  return textToPieces(htmlToMarkdown(html), 'md');
 }
 
-function stripTags(html: string): string {
+function htmlToMarkdown(html: string): string {
   return html
-    .replace(/<[^>]*>/g, ' ')
+    .replace(/<h1[^>]*>([\s\S]*?)<\/h1>/gi, '\n# $1\n')
+    .replace(/<h2[^>]*>([\s\S]*?)<\/h2>/gi, '\n## $1\n')
+    .replace(/<\/(p|li|tr|div|blockquote)>/gi, '\n')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ')
     .replace(/&nbsp;/g, ' ')
     .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
     .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .trim();
-}
-
-function truncate(s: string, n = 60): string {
-  return s.length <= n ? s : `${s.slice(0, n - 1)}…`;
+    .replace(/&gt;/g, '>');
 }

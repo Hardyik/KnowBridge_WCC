@@ -1,10 +1,11 @@
-# Gateway Migration — Contacts
+# SafeSense — Contacts
 
 | Area | Contact | When to involve |
 | --- | --- | --- |
-| Vendor integration | Elif Karaca, Stripe partner team | webhook or payout edge cases |
-| Settlement ops | Marta Rubio, Finance systems | reconciliation diffs, cut-over windows |
-| Security review | Dana Okafor, AppSec | any change touching credential handling |
+| Model accuracy | Meera Iyer, backend and models | any change to flood_best.pt or hazard thresholds |
+| Mobile release | Priya Sharma, Flutter client | APK builds, API base URL, Play/APK distribution |
+| Campus infrastructure | Arun Desai, university IT | VM access, firewall rules, LAN addressing |
+| Security review | Dana Okafor, AppSec | anything touching JWT_SECRET or database credentials |
 
-Escalation: vendor incidents go through Elif first; outages affecting live
-settlement page the payments on-call.
+Escalation: model regressions go to Meera first; anything that exposes the
+database or the .env file pages Dana immediately.

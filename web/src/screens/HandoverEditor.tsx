@@ -8,7 +8,7 @@ import { Link, useParams } from 'react-router-dom';
 import { ClaimWithEvidence, HandoverClaimReview } from '@knowbridge/shared';
 import { get, patch, post, ApiError } from '../api';
 import { Header } from './ProjectsScreen';
-import { EvidenceList, StatusBadge } from '../components/ClaimNodes';
+import { EvidenceList, OwnerLine, StatusBadge } from '../components/ClaimNodes';
 
 interface Loaded {
   handover: {
@@ -193,7 +193,7 @@ export default function HandoverEditor() {
                 <div>
                   <div style={{ marginTop: 8 }}>{claim.text}</div>
                   {claim.reasoning && <div className="reasoning">Why: {claim.reasoning}</div>}
-                  {claim.owner_text && <div className="ownerline">Owner: {claim.owner_text}</div>}
+                  <OwnerLine owner={claim.owner_text} />
                   <EvidenceList evidence={claim.evidence} />
                   <button
                     className="btn secondary small"

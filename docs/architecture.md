@@ -36,8 +36,10 @@ commit) with the verbatim quote and, for GitHub, a resolvable URL.
   quote are `unsupported` and are labelled "no evidence"; the model prompt
   (server/services/groq.ts) enforces skip-over-invent with verbatim-quote
   requirements; zod validation drops anything outside the schema.
-- **Conflicts**: same-category claims with opposite state words are upgraded
-  to `conflicting` automatically; the reviewer resolves them.
+- **Conflicts**: claims about the same subject with opposite state words are
+  upgraded to `conflicting` automatically, even when the model filed them
+  under different categories (it frequently switches between `task` and
+  `other` for the same fact); the reviewer resolves them.
 - **Human control**: draft -> reviewer edit/verify/reject/redact -> manager
   approval -> versioned history; everything is audited (audit_log).
 - **Permission-aware**: recipients get a server-computed role view
@@ -68,7 +70,8 @@ commit) with the verbatim quote and, for GitHub, a resolvable URL.
 
 ## 5. Known limitations (Round 2)
 
-- Extraction runs synchronously per piece; large repos take minutes.
+- Extraction runs synchronously per piece; large repos take minutes, and the
+  Groq free tier throttles per minute (the client honours one Retry-After).
 - Conflict detection is lexical-heuristic, not semantic.
 - One GitHub repo connector; token is static PAT, not an app install flow.
 - No mobile app (deferred); no Slack/drive integrations (future scope).

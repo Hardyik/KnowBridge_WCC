@@ -55,23 +55,25 @@ export async function extractClaimsFromText(
   if (!groqApiKey) throw new Error('GROQ_API_KEY is not set');
   if (!text.trim()) return [];
 
-  const res = await fetch(API, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${groqApiKey}`,
-    },
-    body: JSON.stringify({
-      model,
-      // JSON output mode — responses are parseable; validation still applied.
-      response_format: { type: 'json_object' },
-      temperature: 0,
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: text.slice(0, 12000) },
-      ],
-    }),
+  const payload = JSON.stringify({
+    model,
+    // JSON output mode — responses are parseable; validation still applied.
+    response_format: { type: 'json_object' },
+    temperature: 0,
+    messages: [
+      { role: 'system', content: SYSTEM_PROMPT },
+      { role: 'user', content: text.slice(0, 12000) },
+    ],
   });
+
+  // Free-tier Groq throttles per minute; honour Retry-After once per call so a
+  // demo extraction does not silently lose pieces.
+  let res = await post(groqApiKey, payload);
+  if (res.status === 429) {
+    const waitMs = Math.min(Number(res.headers.get('retry-after') ?? 5) * 1000, 30_000);
+    await new Promise((r) => setTimeout(r, waitMs));
+    res = await post(groqApiKey, payload);
+  }
 
   if (res.status === 429) throw new Error('Groq rate limit — retry shortly');
   if (res.status === 401) throw new Error('Groq API key invalid');
@@ -86,6 +88,14 @@ export async function extractClaimsFromText(
   if (!parsed.success) return [];
   // Cap pathological outputs.
   return parsed.data.claims.slice(0, 40);
+}
+
+function post(apiKey: string, body: string) {
+  return fetch(API, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+    body,
+  });
 }
 
 function safeJson(content: string): unknown {

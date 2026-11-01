@@ -1,6 +1,6 @@
 import React from 'react';
 import { ClaimWithEvidence } from '@knowbridge/shared';
-import { EvidenceList, StatusBadge } from './ClaimNodes';
+import { EvidenceList, OwnerLine, StatusBadge } from './ClaimNodes';
 
 /** Full claim view with linked-to-source evidence (doc §2.2 "Verify"). */
 export default function ClaimInspector({
@@ -27,7 +27,7 @@ export default function ClaimInspector({
         </div>
         <h3 style={{ marginTop: 12 }}>{claim.text}</h3>
         {claim.reasoning && <p className="reasoning">Reasoning (from source): {claim.reasoning}</p>}
-        {claim.owner_text && <p className="ownerline">Owner: {claim.owner_text}</p>}
+        <OwnerLine owner={claim.owner_text} />
         <EvidenceList evidence={claim.evidence} />
         {children}
         <p className="muted small" style={{ marginTop: 10 }}>

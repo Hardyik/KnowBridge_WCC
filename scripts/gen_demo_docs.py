@@ -1,12 +1,20 @@
 """
 Demo data generator (synthetic, per doc §8): produces the KnowBridge demo
-document set for the "Payments Platform — Gateway Migration" scenario.
+document set for the "SafeSense — hazard reporting" handover scenario.
+
+The repository connected in the demo is github.com/Hardyik/SafeSense
+(Flutter app + Flask/MySQL backend + three YOLO hazard models). These
+documents are the synthetic handover material the outgoing team left
+behind — same project, so extracted claims and repository evidence line
+up for a judge.
 
 Planted for the judge walkthrough (proposal §5.4):
-  1. A key decision WITH its reasoning preserved in the source  -> supported claim
-  2. A decision with reasoning but no owner anywhere             -> "Owner not confirmed"
-  3. Two sources that contradict each other about migration state -> conflicting claims
-  4. An unresolved question and missing runbook step             -> unsupported/open
+  1. A key decision WITH its reasoning and a named owner   -> supported claim
+  2. A decision with no owner named anywhere               -> "Owner not confirmed"
+  3. Two documents that contradict each other on the flood
+     model rollout state                                   -> conflicting claims
+  4. A credential/risk item a reviewer must redact before
+     sharing with the incoming person                      -> redaction demo
 
 Run:  python scripts/gen_demo_docs.py
 """
@@ -32,54 +40,55 @@ def _text_page(c: canvas.Canvas, title: str, body: list[str], page: int) -> None
             y -= 16
         y -= 6
     c.setFont("Helvetica", 8)
-    c.drawRightString(540, 40, f"Payments Platform — demo document, page {page}")
+    c.drawRightString(540, 40, f"SafeSense handover — synthetic demo document, page {page}")
     c.showPage()
 
 
-def gen_db_migration_pdf(path: Path) -> None:
-    """decisions.pdf: 2 pages, decision + reasoning + named owner on p1; p2 decommission decision WITHOUT owner."""
+def gen_decisions_pdf(path: Path) -> None:
+    """decisions.pdf: 2 pages, decision + reasoning + owner on p1; p2 decision WITHOUT owner."""
     c = canvas.Canvas(str(path), pagesize=A4)
 
     _text_page(
         c,
-        "Gateway Migration — Decision Record (draft 3)",
+        "SafeSense — Architecture Decision Record (draft 2)",
         [
             "",
-            "Decision: We selected the Stripe-adapter microservice over direct vendor",
-            "SDK integration for the transaction routing service.",
+            "Decision: Hazard detection stays server-side in the Flask backend",
+            "using the three YOLO model files, instead of running inference",
+            "on-device inside the Flutter app.",
             "",
-            "Reasoning: Direct SDK integration tied our core payments flows to one",
-            "vendor's client library lifetime and gave us no control over edge-case",
-            "handling during gateway outages. The adapter service isolates vendor",
-            "behaviour behind our own interface and keeps the legacy refund",
-            "reconciliation path intact while the migration completes.",
+            "Reasoning: On-device inference could not finish inside two seconds",
+            "on the low-end Android phones used in the pilot, and every model",
+            "update would have required a Play Store release. Keeping the",
+            "models behind the Flask API lets us ship a new .pt file without",
+            "touching the mobile client, and the app only needs the API base",
+            "URL (configured through dart-define or lib/config/app_config.dart).",
             "",
-            "Architecture owner: Aarav Mehta (Payments Platform team).",
-            "Implementation owner: Sofia Lindqvist (Transaction Services).",
+            "Backend owner: Meera Iyer (Flask API and model serving).",
+            "Mobile owner: Priya Sharma (Flutter client, release builds).",
             "",
-            "Approval: signed off in architecture review, 14 March 2026.",
+            "Approved in the architecture review on 12 March 2026.",
         ],
         1,
     )
 
     _text_page(
         c,
-        "Gateway Migration — Decision Record (draft 3), continued",
+        "SafeSense — Architecture Decision Record (draft 2), continued",
         [
             "",
-            "Related decision: The legacy transaction-processing service",
-            "(internal codename \"TF-Bridge\") is scheduled for decommission after",
-            "two clean settlement cycles. TF-Bridge contains unreferenced",
-            "reconciliation jobs that must be inventoried before removal.",
+            "Related decision: The Firebase storage bucket used by the first",
+            "prototype is retired. Uploaded photos are written to local disk",
+            "on the API host and referenced from the MySQL uploaded_image",
+            "column, matching the 100% local architecture in the README.",
             "",
-            "NOTE: The decommission decision above was recorded without a named",
-            "owner because the last maintainer left the team before this record",
-            "was drafted. Whoever takes over payments work must confirm an owner",
-            "for the TF-Bridge inventory in their first week.",
+            "NOTE: This retirement decision was recorded without a named owner.",
+            "The original author left the team before it was written down, and",
+            "no review note assigns one. The incoming engineer must confirm who",
+            "owns revoking the old Firebase credentials.",
             "",
-            "Open follow-up: final vendor sandbox dataset location was never",
-            "documented — the test-data scripts reference a bucket that is no",
-            "longer mounted.",
+            "Open question: video-based hazard detection was proposed during",
+            "the pilot but was never evaluated or scoped.",
         ],
         2,
     )
@@ -88,52 +97,65 @@ def gen_db_migration_pdf(path: Path) -> None:
 
 
 def gen_status_docx(path: Path) -> None:
-    """status.docx: claims migration COMPLETE (conflicts with the demo repo)."""
+    """status.docx: claims the flood model rollout is COMPLETE (conflicts with the runbook)."""
     doc = Document()
-    doc.add_heading("Gateway Migration — Status Memo", level=1)
-    doc.add_heading("Migration status", level=2)
+    doc.add_heading("SafeSense — Status Memo", level=1)
+
+    doc.add_heading("Rollout status", level=2)
     doc.add_paragraph(
-        "The transaction routing service migration is complete and running "
-        "in production as of 18 April 2026. Legacy gateway traffic has been "
-        "cut over and the adapter service is processing live settlement."
+        "The flood hazard model rollout is complete and live for all users. "
+        "hazard_best.pt, flood_best.pt and hazard_fire_building_best.pt are "
+        "all serving traffic from the Flask backend."
     )
-    doc.add_heading("Work completed", level=2)
+
+    doc.add_heading("Delivered this cycle", level=2)
     doc.add_paragraph(
-        "Refund reconciliation port completed by Sofia Lindqvist. "
-        "Encryption protocol wrapper completed and reviewed by Aarav Mehta."
+        "Admin dashboard shipped with alert review and user promotion. "
+        "Emergency contacts, location shares and risk zones are backed by "
+        "the migration script 001_add_new_tables.sql."
     )
+
     doc.add_heading("Known gaps", level=2)
     doc.add_paragraph(
-        "The TF-Bridge decommission inventory has no confirmed owner and the "
-        "detailed reconciliation jobs are undocumented."
+        "The Firebase retirement decision still has no named owner, and the "
+        "release checklist omits the JWT secret rotation step."
     )
     doc.save(str(path))
 
 
 def gen_runbook(path: Path) -> None:
     path.write_text(
-        """Payments Platform — Ops Runbook (excerpt)
+        """SafeSense — Ops Runbook (excerpt)
 
-Section: Deployment
-The adapter service deploys through the payments pipeline with the
-profile "adapter-prod". Rolling restart takes about four minutes; do not
-run migration reconciliation jobs during the restart window.
-Deployment owner for this profile: Aarav Mehta.
+Section: Backend deployment
+The Flask API runs on the university VM behind the campus network. Deploy
+by pulling the Backend folder, reinstalling requirements.txt, importing
+schema.sql (or the newest migration) and restarting the service.
+Deployment owner for the VM: Meera Iyer.
+
+Section: Mobile release
+Build the release APK with the API base URL baked in:
+
+    flutter build apk --release --dart-define=API_BASE_URL=http://<LAN-IP>:5000
+
+The manifest allows cleartext LAN traffic, so the phone and the VM must be
+on the same network. Release owner: Priya Sharma.
 
 Section: Credentials
-Sandbox and production vendor keys live in the payments secrets manager
-under "gateway/sandbox" and "gateway/production". The legacy TF-Bridge
-credential set is revoked and must not be reused.
+Database credentials and JWT_SECRET live in Backend/.env and must never be
+committed. The old Firebase storage bucket is still reachable — its
+service account key was never revoked after the prototype was retired.
 
-Section: Known issues
-Vendor webhook retries double-count refunds when the adapter is slow to
-acknowledge. Workaround until the patch: enable idempotency guard flags
-on refund endpoints.
+Section: Rollout status
+The flood hazard model rollout is pending and has not been released to
+users. Only hazard_best.pt and hazard_fire_building_best.pt are approved
+for the pilot; flood_best.pt still needs a second accuracy pass on the
+labelled flood images collected in February.
 
 Section: Missing
-The run of TF-Bridge reconciliation jobs is undocumented — nobody on the
-current team knows whether these still fire on the legacy scheduler.
-Marked as an open question for the incoming engineer.
+Nobody documented how the risk-zone polygons were generated, and the
+labelled dataset used to train the three models is not stored with the
+repository. Treat both as open questions for the incoming engineer.
 """,
         encoding="utf-8",
     )
@@ -141,23 +163,24 @@ Marked as an open question for the incoming engineer.
 
 def gen_contacts(path: Path) -> None:
     path.write_text(
-        """# Gateway Migration — Contacts
+        """# SafeSense — Contacts
 
 | Area | Contact | When to involve |
 | --- | --- | --- |
-| Vendor integration | Elif Karaca, Stripe partner team | webhook or payout edge cases |
-| Settlement ops | Marta Rubio, Finance systems | reconciliation diffs, cut-over windows |
-| Security review | Dana Okafor, AppSec | any change touching credential handling |
+| Model accuracy | Meera Iyer, backend and models | any change to flood_best.pt or hazard thresholds |
+| Mobile release | Priya Sharma, Flutter client | APK builds, API base URL, Play/APK distribution |
+| Campus infrastructure | Arun Desai, university IT | VM access, firewall rules, LAN addressing |
+| Security review | Dana Okafor, AppSec | anything touching JWT_SECRET or database credentials |
 
-Escalation: vendor incidents go through Elif first; outages affecting live
-settlement page the payments on-call.
+Escalation: model regressions go to Meera first; anything that exposes the
+database or the .env file pages Dana immediately.
 """,
         encoding="utf-8",
     )
 
 
 if __name__ == "__main__":
-    gen_db_migration_pdf(DOCS / "decisions.pdf")
+    gen_decisions_pdf(DOCS / "decisions.pdf")
     gen_status_docx(DOCS / "status.docx")
     gen_runbook(DOCS / "ops-runbook.txt")
     gen_contacts(DOCS / "contacts.md")
