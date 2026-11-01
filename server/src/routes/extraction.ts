@@ -3,7 +3,8 @@
  */
 import { Router } from 'express';
 import { z } from 'zod';
-import { AuthedRequest, asyncHandler, HttpError, audit, requireMember } from '../auth.js';
+import { MemberRole } from '@knowbridge/shared';
+import { AuthedRequest, asyncHandler, HttpError, audit, requireAuth, requireMember } from '../auth.js';
 import { serviceClient, Tables } from '../db.js';
 import { runExtraction } from '../services/extraction.js';
 
@@ -48,22 +49,45 @@ router.get(
   }),
 );
 
+/**
+ * Load a claim and verify the caller is a member of its project.
+ * Shared by GET (member read) and PATCH (reviewer/manager write).
+ */
+async function loadClaimForMember(claimId: string, userId: string) {
+  const db = serviceClient();
+  const { data: claim } = await db
+    .from(Tables.claims)
+    .select('id, project_id')
+    .eq('id', claimId)
+    .single();
+  if (!claim) throw new HttpError(404, 'Claim not found');
+  const { data: membership } = await db
+    .from(Tables.projectMembers)
+    .select('role')
+    .eq('project_id', claim.project_id)
+    .eq('user_id', userId)
+    .maybeSingle();
+  if (!membership) throw new HttpError(403, 'You are not a member of this project');
+  return { claim: claim as { id: string; project_id: string }, role: membership.role as MemberRole };
+}
+
 router.get(
   '/claims/:claimId',
-  // project membership is checked below through the claim's project_id
+  requireAuth,
   asyncHandler(async (req: AuthedRequest, res) => {
+    const { claim } = await loadClaimForMember(req.params.claimId!, req.profile!.id);
     const db = serviceClient();
-    const { data: claim } = await db
+    const { data: full } = await db
       .from(Tables.claims)
       .select('*')
-      .eq('id', req.params.claimId)
+      .eq('id', claim.id)
       .single();
-    if (!claim) throw new HttpError(404, 'Claim not found');
+    if (!full) throw new HttpError(404, 'Claim not found');
     const { data: evidence } = await db
       .from(Tables.claimEvidence)
       .select('*')
       .eq('claim_id', claim.id);
-    res.json({ claim: { ...claim, evidence: evidence ?? [] } });
+    res.json({ claim: { ...full, evidence: evidence ?? [] } });
   }),
 );
 
@@ -76,22 +100,12 @@ const PatchClaim = z.object({
 
 router.patch(
   '/claims/:claimId',
+  requireAuth,
   asyncHandler(async (req: AuthedRequest, res) => {
-    // Permission check: caller must be member of the claim's project.
+    // Permission check: caller must be a reviewer/manager of the claim's project.
     const db = serviceClient();
-    const { data: claim } = await db
-      .from(Tables.claims)
-      .select('id, project_id')
-      .eq('id', req.params.claimId)
-      .single();
-    if (!claim) throw new HttpError(404, 'Claim not found');
-    const { data: membership } = await db
-      .from(Tables.projectMembers)
-      .select('role')
-      .eq('project_id', claim.project_id)
-      .eq('user_id', req.profile!.id)
-      .maybeSingle();
-    if (!membership || membership.role === 'recipient') {
+    const { claim, role } = await loadClaimForMember(req.params.claimId!, req.profile!.id);
+    if (role === 'recipient') {
       throw new HttpError(403, 'Reviewer or manager role required to edit claims');
     }
 

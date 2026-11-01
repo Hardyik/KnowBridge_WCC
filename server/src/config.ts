@@ -13,7 +13,7 @@ export const config = {
   supabaseAnonKey: required('SUPABASE_ANON_KEY', ''),
   supabaseServiceKey: required('SUPABASE_SERVICE_ROLE_KEY', ''),
   groqApiKey: process.env.GROQ_API_KEY ?? '',
-  groqModel: process.env.GROQ_MODEL ?? 'llama-3.3-70b-versatile',
+  groqModel: process.env.GROQ_MODEL ?? 'openai/gpt-oss-120b',
 };
 
 /** True when Supabase credentials are configured. */

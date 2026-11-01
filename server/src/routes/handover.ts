@@ -184,7 +184,7 @@ router.get(
     const { handover, claims } = await loadHandoverWithClaims(req.params.handoverId!);
     if (role === 'recipient') {
       if (handover.status !== 'approved') throw new HttpError(403, 'Handover not yet approved');
-      return res.json(recipientView(handover, claims, 'general', req.profile!.id));
+      return res.json(recipientView(handover, claims, roleTagForMember(role as MemberRole), req.profile!.id));
     }
     res.json({ handover, claims });
   }),
@@ -315,28 +315,32 @@ const HANDOVER_SECTIONS_ORDER = [
   'next_actions',
   'open_questions',
 ] as const;
-
-const RECIPIENT_ROLES_DICT: Record<string, RecipientRoleTag> = {
-  manager: 'manager',
-  reviewer: 'engineer',
-  engineer: 'engineer',
-  coordinator: 'coordinator',
-  general: 'general',
-};
+/**
+ * Role tags are derived ONLY from project_members.role (server-authoritative).
+ * A recipient can never reach 'all'-section tags (manager/engineer)
+ * regardless of any query parameter; redaction still applies on top.
+ */
+export function roleTagForMember(role: MemberRole): RecipientRoleTag {
+  switch (role) {
+    case 'manager':
+      return 'manager';
+    case 'reviewer':
+      return 'engineer';
+    default:
+      return 'general'; // recipient — narrowest scope
+  }
+}
 
 router.get(
   '/handovers/:handoverId/recipient-view',
   requireHandoverMember(),
   asyncHandler(async (req: AuthedRequest, res) => {
-    const role = (req as AuthedRequest & { memberRole?: MemberRole }).memberRole;
-    const roleTag: RecipientRoleTag =
-      RECIPIENT_ROLES_DICT[String(req.query.role ?? '')] ??
-      (role === 'recipient' ? 'general' : 'engineer');
+    const role = ((req as AuthedRequest & { memberRole?: MemberRole }).memberRole ?? 'recipient') as MemberRole;
     const { handover, claims } = await loadHandoverWithClaims(req.params.handoverId!);
     if (handover.status !== 'approved') {
       throw new HttpError(403, 'Handover is not approved yet');
     }
-    res.json(recipientView(handover, claims, roleTag, req.profile!.id));
+    res.json(recipientView(handover, claims, roleTagForMember(role), req.profile!.id));
   }),
 );
 
