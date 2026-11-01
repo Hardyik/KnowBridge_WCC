@@ -1,0 +1,22 @@
+Payments Platform — Ops Runbook (excerpt)
+
+Section: Deployment
+The adapter service deploys through the payments pipeline with the
+profile "adapter-prod". Rolling restart takes about four minutes; do not
+run migration reconciliation jobs during the restart window.
+Deployment owner for this profile: Aarav Mehta.
+
+Section: Credentials
+Sandbox and production vendor keys live in the payments secrets manager
+under "gateway/sandbox" and "gateway/production". The legacy TF-Bridge
+credential set is revoked and must not be reused.
+
+Section: Known issues
+Vendor webhook retries double-count refunds when the adapter is slow to
+acknowledge. Workaround until the patch: enable idempotency guard flags
+on refund endpoints.
+
+Section: Missing
+The run of TF-Bridge reconciliation jobs is undocumented — nobody on the
+current team knows whether these still fire on the legacy scheduler.
+Marked as an open question for the incoming engineer.
