@@ -234,6 +234,8 @@ export interface ExtractionResultSummary {
   claims_created: number;
   claims_conflicting: number;
   unsupported_flagged: number;
+  /** Grounded by the model but whose quote could not be verified verbatim. */
+  needs_review_flagged: number;
   deduped: number;
 }
 

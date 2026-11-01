@@ -55,6 +55,7 @@ export async function runExtraction(
     claims_created: 0,
     claims_conflicting: 0,
     unsupported_flagged: 0,
+    needs_review_flagged: 0,
     deduped: 0,
   };
 
@@ -65,7 +66,6 @@ export async function runExtraction(
       extracted = await extractClaimsFromText(piece.text, config.groqApiKey, config.groqModel);
     } catch (err) {
       // One bad API call must not abort the whole pipeline; surface at end.
-      summary.unsupported_flagged += 0;
       console.error('Groq call failed for piece', piece.id, err);
       continue;
     }
@@ -73,8 +73,16 @@ export async function runExtraction(
     for (const raw of extracted) {
       const claim = raw;
       const quote = claim.quote?.trim() || null;
-      const grounded = quote !== null && !claim.unsupported;
-      const status = grounded ? 'supported' : 'unsupported';
+      // Grounded only when the model both did not flag itself and the quote it
+      // gave really occurs in the source text. A missing quote is unsupported;
+      // a quote that cannot be verified verbatim stays evidence-backed but is
+      // `needs_review` — never silently upgraded to fact.
+      const status: 'supported' | 'needs_review' | 'unsupported' =
+        quote === null || claim.unsupported
+          ? 'unsupported'
+          : quoteVerbatimIn(piece.text, quote)
+            ? 'supported'
+            : 'needs_review';
 
       // Dedup: same category + high token overlap => skip, merge evidence instead.
       const dup = [...existingList].find((e) => e.category === claim.category && similar(e.text, claim.text) > 0.85);
@@ -96,9 +104,9 @@ export async function runExtraction(
       const conflict = existingList.find(
         (e) => e.category === claim.category && contradictory(e.text, claim.text),
       );
-      const statusFinal: 'supported' | 'conflicting' | 'unsupported' = conflict
+      const statusFinal: 'supported' | 'needs_review' | 'conflicting' | 'unsupported' = conflict
         ? 'conflicting'
-        : (status as 'supported' | 'unsupported');
+        : status;
       if (conflict) {
         await db.from(Tables.claims).update({ status: 'conflicting', updated_at: new Date().toISOString() }).eq('id', conflict.id);
         summary.claims_conflicting++;
@@ -132,6 +140,7 @@ export async function runExtraction(
       });
       summary.claims_created++;
       if (statusFinal === 'unsupported') summary.unsupported_flagged++;
+      if (statusFinal === 'needs_review') summary.needs_review_flagged++;
     }
   }
 
@@ -172,6 +181,12 @@ function similar(a: string, b: string): number {
   let inter = 0;
   for (const t of ta) if (tb.has(t)) inter++;
   return inter / (ta.size + tb.size - inter);
+}
+
+/** Verbatim check (doc §3.4): does this quote really occur in the source text? */
+export function quoteVerbatimIn(text: string, quote: string): boolean {
+  const norm = (s: string) => s.toLowerCase().replace(/\s+/g, ' ').trim();
+  return norm(text).includes(norm(quote));
 }
 
 /** True when same subject is described with opposite state words. */
