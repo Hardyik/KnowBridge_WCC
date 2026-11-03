@@ -1,22 +1,33 @@
-import 'dotenv/config'; // loaded only if present: node --import tsx handles .env via dotenv in scripts
+import dotenv from 'dotenv';
+import { z } from 'zod';
 
-function required(name: string, fallback?: string): string {
-  const v = process.env[name] ?? fallback;
-  if (!v) throw new Error(`Missing required env var: ${name}`);
-  return v;
+// .env is authoritative locally; without override an inherited PORT (often 0)
+// would silently win and the server would bind a random port.
+dotenv.config({ override: true });
+
+const schema = z.object({
+  SUPABASE_URL: z.string().url(),
+  SUPABASE_ANON_KEY: z.string().min(10),
+  SUPABASE_SERVICE_ROLE_KEY: z.string().min(10),
+  GROQ_API_KEY: z.string().min(10).optional(),
+  GROQ_MODEL: z.string().default('openai/gpt-oss-120b'),
+  PORT: z.coerce.number().default(4000),
+  CORS_ORIGIN: z.string().default('http://localhost:5173'),
+});
+
+const parsed = schema.safeParse(process.env);
+if (!parsed.success) {
+  const missing = parsed.error.issues.map((i) => i.path.join('.')).join(', ');
+  throw new Error(`Invalid server environment (${missing}). Copy server/.env.example to server/.env.`);
 }
 
 export const config = {
-  port: Number(process.env.PORT ?? 4000),
-  corsOrigin: (process.env.CORS_ORIGIN ?? 'http://localhost:5173').split(',').map((s) => s.trim()),
-  supabaseUrl: required('SUPABASE_URL', ''),
-  supabaseAnonKey: required('SUPABASE_ANON_KEY', ''),
-  supabaseServiceKey: required('SUPABASE_SERVICE_ROLE_KEY', ''),
-  groqApiKey: process.env.GROQ_API_KEY ?? '',
-  groqModel: process.env.GROQ_MODEL ?? 'openai/gpt-oss-120b',
+  supabaseUrl: parsed.data.SUPABASE_URL,
+  supabaseAnonKey: parsed.data.SUPABASE_ANON_KEY,
+  supabaseServiceKey: parsed.data.SUPABASE_SERVICE_ROLE_KEY,
+  groqApiKey: parsed.data.GROQ_API_KEY,
+  groqModel: parsed.data.GROQ_MODEL,
+  port: parsed.data.PORT > 0 ? parsed.data.PORT : 4000,
+  corsOrigin: parsed.data.CORS_ORIGIN,
+  groqConfigured: Boolean(parsed.data.GROQ_API_KEY),
 };
-
-/** True when Supabase credentials are configured. */
-export function serverConfigured(): boolean {
-  return Boolean(config.supabaseUrl && config.supabaseAnonKey && config.supabaseServiceKey);
-}

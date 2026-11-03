@@ -1,42 +1,44 @@
 import express from 'express';
 import cors from 'cors';
-import { Request, Response, NextFunction } from 'express';
-import { config, serverConfigured } from './config.js';
-import projectsRouter from './routes/projects.js';
-import sourcesRouter from './routes/sources.js';
-import extractionRouter from './routes/extraction.js';
-import handoverRouter from './routes/handover.js';
-import auditRouter from './routes/audit.js';
+import { config } from './config.js';
+import { errorHandler, HttpError } from './auth.js';
+import authRoutes from './routes/auth.js';
+import projectRoutes from './routes/projects.js';
+import sourceRoutes from './routes/sources.js';
+import claimRoutes from './routes/claims.js';
+import handoverRoutes from './routes/handovers.js';
 
 const app = express();
-app.use(cors({ origin: config.corsOrigin, credentials: false }));
-app.use(express.json({ limit: '2mb' }));
 
-app.get('/healthz', (_req: Request, res: Response) => {
+app.disable('x-powered-by');
+app.use(
+  cors({
+    origin: config.corsOrigin.split(',').map((origin) => origin.trim()),
+    credentials: false,
+  }),
+);
+app.use(express.json({ limit: '1mb' }));
+
+app.get('/healthz', (_req, res) => {
   res.json({
     ok: true,
     service: 'knowbridge-api',
-    supabase_configured: serverConfigured(),
-    groq_configured: Boolean(config.groqApiKey),
+    supabase_configured: true,
+    groq_configured: config.groqConfigured,
+    model: config.groqModel,
   });
 });
 
-app.use('/api', auditRouter);
-app.use('/api', projectsRouter);
-app.use('/api', sourcesRouter);
-app.use('/api', extractionRouter);
-app.use('/api', handoverRouter);
+app.use('/api', authRoutes);
+app.use('/api', projectRoutes);
+app.use('/api', sourceRoutes);
+app.use('/api', claimRoutes);
+app.use('/api', handoverRoutes);
 
-// 404 + error handling
-app.use((_req: Request, res: Response) => res.status(404).json({ error: 'Not found' }));
-app.use((err: Error & { status?: number }, _req: Request, res: Response, _next: NextFunction) => {
-  const status = err.status ?? 500;
-  console.error(`[kb-api] ${status}`, err.message);
-  res.status(status).json({ error: err.message || 'Internal error' });
-});
+app.use((_req, _res, next) => next(new HttpError(404, 'Not found')));
+app.use(errorHandler);
 
 app.listen(config.port, () => {
   console.log(`KnowBridge API listening on :${config.port}`);
-  console.log(`  supabase: ${serverConfigured() ? 'configured' : 'NOT configured'}`);
-  console.log(`  groq:     ${config.groqApiKey ? 'configured' : 'NOT configured'}`);
+  console.log(`  model: ${config.groqModel}`);
 });

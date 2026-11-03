@@ -1,226 +1,350 @@
-/**
- * Extraction pipeline: source pieces -> Groq -> validated claims with
- * evidence -> dedup + conflict detection -> Supabase.
- *
- * Guarantees enforced here (doc §3.4):
- * - a claim with no quote at all is stored as `unsupported`, and the UI
- *   shows it as "needs evidence", never as verified fact;
- * - two same-category claims whose text contradicts (same subject,
- *   opposite state words) are both upgraded to `conflicting`;
- * - knowledge already collected is not re-created (dedup merges evidence).
- */
 import {
-  ExtractedClaim,
-  ExtractionResultSummary,
+  CLAIM_CATEGORIES,
+  ClaimCategory,
+  ClaimStatus,
+  ExtractionSummary,
   OWNER_UNCONFIRMED,
 } from '@knowbridge/shared';
-import { z } from 'zod';
+import { HttpError } from '../auth.js';
 import { serviceClient, Tables } from '../db.js';
-import { config } from '../config.js';
-import { audit } from '../auth.js';
-import { extractClaimsFromText } from './groq.js';
+import { completeJson } from './llm.js';
+import { normalise } from './documents.js';
 
-export async function runExtraction(
-  ctx: { project_id?: string; profile: { id: string; email: string } },
-): Promise<ExtractionResultSummary> {
-  const projectId = ctx.project_id!;
-  const db = serviceClient();
+interface ChunkRow {
+  id: string;
+  source_id: string;
+  ordinal: number;
+  heading: string;
+  text: string;
+}
 
-  // 1. Load pieces for all sources of this project.
-  const { data: sources, error: srcErr } = await db
-    .from(Tables.sources)
-    .select('id, title, type')
-    .eq('project_id', projectId)
-    .eq('status', 'ready');
-  if (srcErr) throw new Error(`Failed to load sources: ${srcErr.message}`);
-  if (!sources || sources.length === 0) {
-    throw new Error('No sources connected yet — add a document or GitHub repo first');
-  }
+interface DraftClaim {
+  category: ClaimCategory;
+  text: string;
+  quote: string | null;
+  reasoning: string | null;
+  owner_text: string | null;
+}
 
-  const { data: pieces, error: pieceErr } = await db
-    .from(Tables.sourcePieces)
-    .select('id, source_id, idx, label, location, text, url, sources!inner(project_id)')
-    .eq('sources.project_id', projectId)
-    .order('idx', { ascending: true });
-  if (pieceErr) throw new Error(`Failed to load pieces: ${pieceErr.message}`);
+interface StoredClaim {
+  id: string;
+  text: string;
+  source_id: string;
+  chunk_id: string;
+  status: ClaimStatus;
+}
 
-  // 2. Existing claims for dedup/conflict awareness.
-  const { data: existing } = await db
-    .from(Tables.claims)
-    .select('id, category, text, status')
-    .eq('project_id', projectId);
-  const existingList = (existing ?? []) as Array<{ id: string; category: string; text: string; status: string }>;
+const SYSTEM_PROMPT = `You are the extraction engine of KnowBridge, a knowledge-handover tool for software teams.
+You receive one chunk of a project document and return atomic, evidence-backed claims an incoming team member needs.
 
-  const summary: ExtractionResultSummary = {
-    pieces: pieces?.length ?? 0,
-    claims_created: 0,
-    claims_conflicting: 0,
-    unsupported_flagged: 0,
-    needs_review_flagged: 0,
-    deduped: 0,
+Categories (pick exactly one per claim):
+- decision: a choice that was made, and why if the text says why
+- completed: work the text describes as done
+- pending: work that is open, unfinished or awaiting something
+- next_action: an instruction or step someone should perform next
+- owner: a named person/team responsible for something
+- contact: a named person/team to consult, with their role
+- risk: a risk, hazard, caveat or unverified assumption
+- blocker: something currently preventing progress
+- dependency: a system, team, approval or component something relies on
+- setup: how the project is built, configured or run
+
+Rules:
+1. Only state what this chunk says. Never infer, embellish or add general knowledge.
+2. "quote" must be an exact substring copied from the chunk (max 300 characters). If you cannot quote it, omit the claim.
+3. Never invent owners, dates, statuses or decisions. Set "owner_text" only when a person or team is named in this chunk for that item, otherwise null.
+4. Skip navigation, table-of-contents lines, boilerplate, marketing, licence text and repeated headers.
+5. Write "text" as one clear third-person sentence, no hedging, no "the document says".
+6. "reasoning" is one short sentence on why this matters to someone taking over.
+7. Return at most 12 claims, the most useful ones first.
+
+Return strict JSON: {"claims":[{"category":"decision","text":"...","quote":"...","reasoning":"...","owner_text":null}]}`;
+
+/** Coerce one model row into a DraftClaim, or null when unusable. */
+function toDraft(raw: unknown): DraftClaim | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const row = raw as Record<string, unknown>;
+  const category = String(row.category ?? '').toLowerCase().trim() as ClaimCategory;
+  if (!CLAIM_CATEGORIES.includes(category)) return null;
+
+  const text = String(row.text ?? '').replace(/\s+/g, ' ').trim();
+  if (text.length < 12 || text.length > 400) return null;
+
+  const quoteRaw = row.quote === null || row.quote === undefined ? '' : String(row.quote).trim();
+  const ownerRaw = row.owner_text === null || row.owner_text === undefined ? '' : String(row.owner_text).trim();
+  const reasoningRaw =
+    row.reasoning === null || row.reasoning === undefined ? '' : String(row.reasoning).trim();
+
+  return {
+    category,
+    text,
+    quote: quoteRaw ? quoteRaw.slice(0, 320) : null,
+    reasoning: reasoningRaw ? reasoningRaw.slice(0, 240) : null,
+    owner_text: ownerRaw ? ownerRaw.slice(0, 120) : null,
   };
+}
 
-  // 3. Extract per piece.
-  for (const piece of pieces ?? []) {
-    let extracted: ExtractedClaim[];
+async function extractChunk(chunk: ChunkRow, sourceTitle: string): Promise<DraftClaim[]> {
+  const user = `Source: ${sourceTitle}
+Section: ${chunk.heading}
+
+--- chunk start ---
+${chunk.text}
+--- chunk end ---`;
+
+  const content = await completeJson(SYSTEM_PROMPT, user);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    const match = content.match(/\{[\s\S]*\}/);
+    if (!match) return [];
     try {
-      extracted = await extractClaimsFromText(piece.text, config.groqApiKey, config.groqModel);
-    } catch (err) {
-      // One bad API call must not abort the whole pipeline; surface at end.
-      console.error('Groq call failed for piece', piece.id, err);
-      continue;
-    }
-
-    for (const raw of extracted) {
-      const claim = raw;
-      const quote = claim.quote?.trim() || null;
-      // Grounded only when the model both did not flag itself and the quote it
-      // gave really occurs in the source text. A missing quote is unsupported;
-      // a quote that cannot be verified verbatim stays evidence-backed but is
-      // `needs_review` — never silently upgraded to fact.
-      const status: 'supported' | 'needs_review' | 'unsupported' =
-        quote === null || claim.unsupported
-          ? 'unsupported'
-          : quoteVerbatimIn(piece.text, quote)
-            ? 'supported'
-            : 'needs_review';
-
-      // Dedup: same category + high token overlap => skip, merge evidence instead.
-      const dup = [...existingList].find((e) => e.category === claim.category && similar(e.text, claim.text) > 0.85);
-      if (dup) {
-        summary.deduped++;
-        await db.from(Tables.claimEvidence).insert({
-          claim_id: dup.id,
-          source_id: piece.source_id,
-          piece_id: piece.id,
-          label: `${piece.label}`,
-          location: `${piece.location}`,
-          url: piece.url,
-          quote,
-        });
-        continue;
-      }
-
-      // Conflict: contradicts an existing claim about the same subject. The
-      // model often files the same fact under `task` in one source and
-      // `other`/`decision` in another, so state-bearing categories are
-      // compared with each other rather than requiring an exact category hit.
-      const conflict = existingList.find((e) => contradictoryClaims(e, claim));
-      const statusFinal: 'supported' | 'needs_review' | 'conflicting' | 'unsupported' = conflict
-        ? 'conflicting'
-        : status;
-      if (conflict) {
-        await db.from(Tables.claims).update({ status: 'conflicting', updated_at: new Date().toISOString() }).eq('id', conflict.id);
-        summary.claims_conflicting++;
-      }
-
-      const text = claim.text.slice(0, 2000);
-      const { data: created, error: createErr } = await db
-        .from(Tables.claims)
-        .insert({
-          project_id: projectId,
-          category: claim.category,
-          text,
-          reasoning: claim.reasoning ?? null,
-          // A decision with no named owner is exactly the ownership gap the
-          // handover must surface; mark it literally instead of leaving blank.
-          owner_text: claim.owner_text ?? (claim.category === 'decision' ? OWNER_UNCONFIRMED : null),
-          status: statusFinal,
-          confidence: 0.5,
-        })
-        .select('id')
-        .single();
-      if (createErr) throw new Error(`Failed to persist claim: ${createErr.message}`);
-      existingList.push({ id: created!.id, category: claim.category, text, status: statusFinal });
-
-      await db.from(Tables.claimEvidence).insert({
-        claim_id: created!.id,
-        source_id: piece.source_id,
-        piece_id: piece.id,
-        label: piece.label,
-        location: piece.location,
-        url: piece.url,
-        quote,
-      });
-      summary.claims_created++;
-      if (statusFinal === 'unsupported') summary.unsupported_flagged++;
-      if (statusFinal === 'needs_review') summary.needs_review_flagged++;
+      parsed = JSON.parse(match[0]);
+    } catch {
+      return [];
     }
   }
+  const rows = (parsed as { claims?: unknown[] }).claims;
+  if (!Array.isArray(rows)) return [];
+  return rows.map(toDraft).filter((c): c is DraftClaim => Boolean(c));
+}
 
-  await audit(projectId, { id: ctx.profile.id, email: ctx.profile.email }, 'extraction.run', {
-    summary,
+/** Does the quote actually appear in the chunk? Returns the review status. */
+function evidenceStatus(chunkText: string, quote: string | null): ClaimStatus {
+  if (!quote) return 'unsupported';
+  return normalise(chunkText).includes(normalise(quote)) ? 'supported' : 'needs_review';
+}
+
+function runsWithConcurrency<T>(items: T[], limit: number, worker: (item: T) => Promise<void>) {
+  let cursor = 0;
+  const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (cursor < items.length) {
+      const item = items[cursor];
+      cursor += 1;
+      await worker(item);
+    }
   });
-  return summary;
+  return Promise.all(runners);
 }
 
 // ---------------------------------------------------------------------------
-// Similarity / contradiction heuristics (deterministic, explainable)
+// Conflict detection (deterministic, inspectable — no model involved)
 // ---------------------------------------------------------------------------
 
-const NEG_WORDS: Record<'done' | 'undone' | 'deprecated' | 'active' | 'approved' | 'blocked', RegExp> = {
-  done: /\b(complete[d]?|finished|done|shipped|migrat(ed|ion) (complete[d]?|finish))\b/i,
-  undone: /\b(incomplete|pending|not ( yet )?(complete[d]?|finish|done|start)|in progress|waiting|blocked)\b/i,
-  deprecated: /\b(deprecated|removed|replaced|no longer)\b/i,
-  active: /\b(active|current|used)\b/i,
-  approved: /\b(approved|accepted|signed)\b/i,
-  blocked: /\b(blocked|stuck|waiting)\b/i,
-};
+const OPPOSING_POLES: [RegExp, RegExp][] = [
+  [
+    /\bpending\b|\bnot yet\b|\bunfinished\b|\bin progress\b|\bawaiting\b/,
+    /\b(complete|completed|done|finished|released|deployed|live|shipped)\b/,
+  ],
+  [
+    /\b(disabled|removed|retired|decommissioned|deprecated|revoked)\b/,
+    /\b(enabled|active|in use|live|still available|still reachable|still running)\b/,
+  ],
+  [/\bblocked\b|\bcannot proceed\b/, /\bunblocked\b|\bresolved\b|\bno longer blocks\b/],
+  [/\bnot deployed\b|\bnot released\b|\bnot shipped\b/, /\bdeployed\b|\breleased\b|\bshipped\b/],
+];
 
-function tokens(text: string): Set<string> {
+const STOPWORDS = new Set([
+  'the', 'and', 'for', 'that', 'this', 'with', 'from', 'into', 'have', 'has', 'was', 'were',
+  'are', 'not', 'but', 'its', 'their', 'they', 'will', 'been', 'being', 'which', 'when',
+  'than', 'then', 'also', 'only', 'still', 'yet', 'all', 'any', 'can', 'may', 'must', 'has',
+  'had', 'our', 'your', 'over', 'under', 'after', 'before', 'used', 'using', 'via',
+]);
+
+function subjectTokens(text: string): Set<string> {
   return new Set(
-    text
-      .toLowerCase()
+    normalise(text)
       .replace(/[^a-z0-9\s]/g, ' ')
       .split(/\s+/)
-      .filter((t) => t.length > 2),
+      .filter((w) => w.length > 3 && !STOPWORDS.has(w)),
   );
 }
 
-/** Jaccard similarity of tokens. */
-function similar(a: string, b: string): number {
-  const ta = tokens(a);
-  const tb = tokens(b);
-  if (ta.size === 0 || tb.size === 0) return 0;
-  let inter = 0;
-  for (const t of ta) if (tb.has(t)) inter++;
-  return inter / (ta.size + tb.size - inter);
+function overlap(a: Set<string>, b: Set<string>): number {
+  if (!a.size || !b.size) return 0;
+  let shared = 0;
+  for (const token of a) if (b.has(token)) shared += 1;
+  return shared / Math.min(a.size, b.size);
 }
 
-/** Verbatim check (doc §3.4): does this quote really occur in the source text? */
-export function quoteVerbatimIn(text: string, quote: string): boolean {
-  const norm = (s: string) => s.toLowerCase().replace(/\s+/g, ' ').trim();
-  return norm(text).includes(norm(quote));
+export interface ConflictGroup {
+  groupId: string;
+  claimIds: string[];
 }
 
-/** Categories whose wording carries a completion/state meaning worth comparing. */
-function sameStateCategory(a: string, b: string): boolean {
-  const stateBearing = new Set(['task', 'decision', 'other', 'setup']);
-  return a === b || (stateBearing.has(a) && stateBearing.has(b));
+/**
+ * Two claims conflict when they talk about the same subject but sit on
+ * opposite poles of it ("rollout pending" vs "rollout complete"). We show both
+ * to the reviewer instead of picking one.
+ */
+export function detectConflicts(claims: StoredClaim[]): ConflictGroup[] {
+  const groups: ConflictGroup[] = [];
+  const claimed = new Set<string>();
+
+  for (let i = 0; i < claims.length; i += 1) {
+    for (let j = i + 1; j < claims.length; j += 1) {
+      const a = claims[i];
+      const b = claims[j];
+      if (a.id === b.id || claimed.has(a.id) || claimed.has(b.id)) continue;
+      if (a.chunk_id === b.chunk_id) continue;
+
+      const textA = normalise(a.text);
+      const textB = normalise(b.text);
+      let opposite = false;
+      for (const [poleOne, poleTwo] of OPPOSING_POLES) {
+        if ((poleOne.test(textA) && poleTwo.test(textB)) || (poleTwo.test(textA) && poleOne.test(textB))) {
+          opposite = true;
+          break;
+        }
+      }
+      if (!opposite) continue;
+      if (overlap(subjectTokens(a.text), subjectTokens(b.text)) < 0.4) continue;
+
+      const groupId = `conflict-${groups.length + 1}`;
+      groups.push({ groupId, claimIds: [a.id, b.id] });
+      claimed.add(a.id);
+      claimed.add(b.id);
+    }
+  }
+  return groups;
 }
 
-/** Does claim `b` contradict claim `a`? The one place that decision is made. */
-export function contradictoryClaims(
-  a: { category: string; text: string },
-  b: { category: string; text: string },
-): boolean {
-  return sameStateCategory(a.category, b.category) && contradictory(a.text, b.text);
-}
+// ---------------------------------------------------------------------------
+// Pipeline
+// ---------------------------------------------------------------------------
 
-/** True when same subject is described with opposite state words. */
-function contradictory(a: string, b: string): boolean {
-  const s = similar(a, b);
-  if (s < 0.35 || s > 0.95) return false;
-  if (NEG_WORDS.done.test(a) && NEG_WORDS.undone.test(b)) return true;
-  if (NEG_WORDS.undone.test(a) && NEG_WORDS.done.test(b)) return true;
-  if (NEG_WORDS.deprecated.test(a) && NEG_WORDS.active.test(b)) return true;
-  if (NEG_WORDS.active.test(a) && NEG_WORDS.deprecated.test(b)) return true;
-  return false;
-}
+export async function runExtraction(projectId: string): Promise<ExtractionSummary> {
+  const db = serviceClient();
 
-/** Runtime re-validation guard so nothing untyped enters the DB. */
-export const PersistedClaim = z.object({
-  id: z.string().uuid(),
-  category: z.string(),
-  text: z.string(),
-});
+  const { data: sources, error: sourceError } = await db
+    .from(Tables.sources)
+    .select('id, title, status')
+    .eq('project_id', projectId);
+  if (sourceError) throw new HttpError(500, sourceError.message);
+
+  const ready = (sources ?? []).filter((s) => s.status === 'ready');
+  const failed = (sources ?? []).filter((s) => s.status === 'failed').map((s) => s.title);
+  if (!ready.length) throw new HttpError(400, 'Upload at least one readable document first');
+
+  const sourceTitle = new Map(ready.map((s) => [s.id as string, s.title as string]));
+  const { data: chunks, error: chunkError } = await db
+    .from(Tables.sourceChunks)
+    .select('id, source_id, ordinal, heading, text')
+    .in('source_id', ready.map((s) => s.id))
+    .order('source_id', { ascending: true })
+    .order('ordinal', { ascending: true });
+  if (chunkError) throw new HttpError(500, chunkError.message);
+  const chunkRows = (chunks ?? []) as ChunkRow[];
+  if (!chunkRows.length) throw new HttpError(400, 'Those documents produced no readable text');
+
+  const { data: existing } = await db
+    .from(Tables.claims)
+    .select('text, chunk_id')
+    .eq('project_id', projectId);
+  const existingRows = (existing ?? []) as { text: string; chunk_id: string }[];
+  const seen = new Set(existingRows.map((c) => normalise(c.text)));
+
+  // Incremental extraction: passages that already produced claims are skipped,
+  // so a rate-limited run can simply be repeated to finish the job.
+  const doneChunks = new Set(existingRows.map((c) => c.chunk_id));
+  const pendingChunks = chunkRows.filter((chunk) => !doneChunks.has(chunk.id));
+
+  let created = 0;
+  let duplicates = 0;
+  let unsupported = 0;
+  let needsReview = 0;
+  let ownerGaps = 0;
+  const failures: string[] = [];
+
+  await runsWithConcurrency(pendingChunks, 2, async (chunk) => {
+    const title = sourceTitle.get(chunk.source_id) ?? 'Document';
+    let drafts: DraftClaim[];
+    try {
+      drafts = await extractChunk(chunk, title);
+    } catch (err) {
+      failures.push(`${title} / ${chunk.heading}: ${(err as Error).message}`);
+      return;
+    }
+    if (!drafts.length) return;
+
+    // Ownership gaps are only meaningful when this chunk names nobody at all.
+    const ownerNames = drafts
+      .map((d) => d.owner_text)
+      .filter((n): n is string => Boolean(n));
+
+    const rows = [];
+    const batchSeen = new Set<string>();
+    for (const draft of drafts) {
+      const key = normalise(draft.text);
+      if (seen.has(key) || batchSeen.has(key)) {
+        duplicates += 1;
+        continue;
+      }
+      batchSeen.add(key);
+
+      const status = evidenceStatus(chunk.text, draft.quote);
+      if (status === 'unsupported') unsupported += 1;
+      if (status === 'needs_review') needsReview += 1;
+
+      const ownerText =
+        draft.owner_text ??
+        ((draft.category === 'decision' || draft.category === 'owner') && ownerNames.length === 0
+          ? OWNER_UNCONFIRMED
+          : null);
+      if (ownerText === OWNER_UNCONFIRMED) ownerGaps += 1;
+
+      rows.push({
+        project_id: projectId,
+        source_id: chunk.source_id,
+        chunk_id: chunk.id,
+        category: draft.category,
+        text: draft.text,
+        original_text: draft.text,
+        quote: draft.quote,
+        location: chunk.heading,
+        reasoning: draft.reasoning,
+        owner_text: ownerText,
+        status,
+        confidence: status === 'supported' ? 0.9 : status === 'needs_review' ? 0.45 : 0.2,
+      });
+      seen.add(key);
+    }
+
+    if (!rows.length) return;
+    const { data: inserted, error: insertError } = await db
+      .from(Tables.claims)
+      .insert(rows)
+      .select('id, text');
+    if (insertError) {
+      failures.push(`${title} / ${chunk.heading}: ${insertError.message}`);
+      return;
+    }
+    created += inserted?.length ?? 0;
+  });
+
+  const { data: allClaims } = await db
+    .from(Tables.claims)
+    .select('id, text, source_id, chunk_id, status')
+    .eq('project_id', projectId);
+  const groups = detectConflicts((allClaims ?? []) as StoredClaim[]);
+  for (const group of groups) {
+    await db
+      .from(Tables.claims)
+      .update({ status: 'conflicting', conflict_group: group.groupId, confidence: 0.5 })
+      .in('id', group.claimIds);
+  }
+
+  await db.from(Tables.projects).update({ last_extracted_at: new Date().toISOString() }).eq('id', projectId);
+
+  return {
+    chunks: chunkRows.length,
+    claims_created: created,
+    duplicates_skipped: duplicates,
+    conflicts: groups.length,
+    unsupported,
+    needs_review: needsReview,
+    owner_gaps: ownerGaps,
+    sources_failed: [...failed, ...failures],
+  } satisfies ExtractionSummary;
+}

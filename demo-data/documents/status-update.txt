@@ -1,0 +1,13 @@
+STATUS UPDATE — week 12, Ledgerline payments migration
+
+Overall the migration is tracking to plan. Card payments have been on the new pathway
+for five weeks with no settlement incidents.
+
+The webhook retry queue is deployed and live for all merchants, so manual replay of
+chargeback webhooks is no longer required.
+
+Pilot feedback from the three merchants is positive. Two asked for a settlement export
+download; that work is scheduled for the next sprint.
+
+Open risks: the reconciliation timeout on the last business day of the month is still
+unresolved, and the legacy processor licence renewal is due in December.

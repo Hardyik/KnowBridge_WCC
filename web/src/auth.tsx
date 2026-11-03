@@ -1,38 +1,73 @@
-import React, { createContext, useContext, useEffect, useState } from 'react';
-import { Session, User } from '@supabase/supabase-js';
-import { supabase } from './supabase';
+import { createContext, ReactNode, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { Profile } from '@knowbridge/shared';
+import { api, readToken, writeToken } from './api';
 
 interface AuthState {
-  session: Session | null;
-  user: User | null;
+  profile: Profile | null;
   loading: boolean;
+  signIn: (email: string, password: string) => Promise<void>;
+  signUp: (email: string, password: string, displayName: string) => Promise<void>;
+  signOut: () => void;
 }
 
-const AuthCtx = createContext<AuthState>({ session: null, user: null, loading: true });
+const AuthContext = createContext<AuthState | null>(null);
 
-export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [session, setSession] = useState<Session | null>(null);
+export function AuthProvider({ children }: { children: ReactNode }) {
+  const [profile, setProfile] = useState<Profile | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    void supabase.auth.getSession().then(({ data }) => {
-      setSession(data.session);
+    const token = readToken();
+    if (!token) {
       setLoading(false);
-    });
-    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => {
-      setSession(s);
-      setLoading(false);
-    });
-    return () => sub.subscription.unsubscribe();
+      return;
+    }
+    api<{ profile: Profile }>('/auth/me')
+      .then((data) => setProfile(data.profile))
+      .catch(() => writeToken(null))
+      .finally(() => setLoading(false));
   }, []);
 
-  return (
-    <AuthCtx.Provider value={{ session, user: session?.user ?? null, loading }}>
-      {children}
-    </AuthCtx.Provider>
+  useEffect(() => {
+    const onSignedOut = () => setProfile(null);
+    window.addEventListener('knowbridge:signed-out', onSignedOut);
+    return () => window.removeEventListener('knowbridge:signed-out', onSignedOut);
+  }, []);
+
+  const signIn = useCallback(async (email: string, password: string) => {
+    const data = await api<{ token: string; profile: Profile }>('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ email, password }),
+    });
+    writeToken(data.token);
+    setProfile(data.profile);
+  }, []);
+
+  const signUp = useCallback(async (email: string, password: string, displayName: string) => {
+    const data = await api<{ token: string; profile: Profile }>('/auth/signup', {
+      method: 'POST',
+      body: JSON.stringify({ email, password, display_name: displayName }),
+    });
+    writeToken(data.token);
+    setProfile(data.profile);
+  }, []);
+
+  const signOut = useCallback(() => {
+    writeToken(null);
+    setProfile(null);
+    window.location.hash = '/';
+  }, []);
+
+  const value = useMemo(
+    () => ({ profile, loading, signIn, signUp, signOut }),
+    [profile, loading, signIn, signUp, signOut],
   );
+
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 
-export function useAuth() {
-  return useContext(AuthCtx);
+export function useAuth(): AuthState {
+  const context = useContext(AuthContext);
+  if (!context) throw new Error('useAuth must be used inside AuthProvider');
+  return context;
 }

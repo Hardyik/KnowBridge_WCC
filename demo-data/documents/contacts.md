@@ -1,11 +1,13 @@
-# SafeSense — Contacts
+Team contacts and ownership
 
-| Area | Contact | When to involve |
-| --- | --- | --- |
-| Model accuracy | Meera Iyer, backend and models | any change to flood_best.pt or hazard thresholds |
-| Mobile release | Priya Sharma, Flutter client | APK builds, API base URL, Play/APK distribution |
-| Campus infrastructure | Arun Desai, university IT | VM access, firewall rules, LAN addressing |
-| Security review | Dana Okafor, AppSec | anything touching JWT_SECRET or database credentials |
+Dana Okafor — payments lead, owns settlement migration and the vendor relationship.
+Reach her on the #payments channel for anything touching bank transfers.
 
-Escalation: model regressions go to Meera first; anything that exposes the
-database or the .env file pages Dana immediately.
+Priya Raman — pilot rollout and merchant communications. She is the person to ask
+before contacting a pilot merchant.
+
+Tomas Berg — reconciliation service and legacy PHP integration. Ask him about month end
+timeouts and the settlement export format.
+
+Security lead — Meera Iyer. Contact her immediately for any suspected credential leak;
+she owns key rotation and the vendor security review.

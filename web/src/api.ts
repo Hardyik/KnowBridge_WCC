@@ -1,53 +1,46 @@
-/**
- * Small typed REST client for the KnowBridge API. The Supabase access token
- * travels as Bearer; the server validates it server-side (never trusts the
- * browser identity, doc §3.5).
- */
-import { supabase } from './supabase';
-
-const BASE = (import.meta.env.VITE_API_URL as string | undefined) ?? '/api';
+// Relative by default (Vite proxies /api in development). A deployed frontend
+// points at the API origin with VITE_API_URL.
+const BASE = (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, '') ?? '/api';
+const TOKEN_KEY = 'knowbridge.token';
 
 export class ApiError extends Error {
-  status: number;
+  readonly status: number;
   constructor(status: number, message: string) {
     super(message);
     this.status = status;
   }
 }
 
-async function token(): Promise<string> {
-  const { data } = await supabase.auth.getSession();
-  const t = data.session?.access_token;
-  if (!t) throw new ApiError(401, 'Not signed in');
-  return t;
+export function readToken(): string | null {
+  return localStorage.getItem(TOKEN_KEY);
+}
+
+export function writeToken(token: string | null): void {
+  if (token) localStorage.setItem(TOKEN_KEY, token);
+  else localStorage.removeItem(TOKEN_KEY);
 }
 
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const t = await token();
-  const res = await fetch(`${BASE}${path}`, {
-    ...init,
-    headers: {
-      ...(init.body && !(init.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}),
-      Authorization: `Bearer ${t}`,
-      ...(init.headers ?? {}),
-    },
-  });
-  if (!res.ok) {
-    let message = `HTTP ${res.status}`;
-    try {
-      const body = (await res.json()) as { error?: string };
-      if (body.error) message = body.error;
-    } catch {
-      /* keep default */
+  const token = readToken();
+  const headers = new Headers(init.headers);
+  if (token) headers.set('Authorization', `Bearer ${token}`);
+  if (init.body && !(init.body instanceof FormData)) headers.set('Content-Type', 'application/json');
+
+  const response = await fetch(`${BASE}${path}`, { ...init, headers });
+  const text = await response.text();
+  const payload = text ? (JSON.parse(text) as Record<string, unknown>) : {};
+
+  if (!response.ok) {
+    const message = typeof payload.error === 'string' ? payload.error : `Request failed (${response.status})`;
+    if (response.status === 401 && readToken()) {
+      writeToken(null);
+      window.dispatchEvent(new Event('knowbridge:signed-out'));
     }
-    throw new ApiError(res.status, message);
+    throw new ApiError(response.status, message);
   }
-  return (await res.json()) as T;
+  return payload as T;
 }
 
-export const get = <T>(path: string) => api<T>(path);
-export const post = <T>(path: string, body: unknown) =>
-  api<T>(path, { method: 'POST', body: body instanceof FormData ? body : JSON.stringify(body) });
-export const patch = <T>(path: string, body: unknown) =>
-  api<T>(path, { method: 'PATCH', body: JSON.stringify(body) });
-export const del = <T>(path: string) => api<T>(path, { method: 'DELETE' });
+export function navigate(path: string): void {
+  window.location.hash = path;
+}
