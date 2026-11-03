@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import { config } from './config.js';
+import { corsOptions } from './cors.js';
 import { errorHandler, HttpError } from './auth.js';
 import authRoutes from './routes/auth.js';
 import projectRoutes from './routes/projects.js';
@@ -11,12 +12,7 @@ import handoverRoutes from './routes/handovers.js';
 const app = express();
 
 app.disable('x-powered-by');
-app.use(
-  cors({
-    origin: config.corsOrigin.split(',').map((origin) => origin.trim()),
-    credentials: false,
-  }),
-);
+app.use(cors(corsOptions(config.corsOrigin)));
 app.use(express.json({ limit: '1mb' }));
 
 app.get('/healthz', (_req, res) => {
