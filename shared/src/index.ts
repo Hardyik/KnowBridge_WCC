@@ -1,25 +1,26 @@
 /**
- * KnowBridge shared domain model.
+ * Shared contract between the Express API and the React client.
  *
- * This package is the single source of truth for API payloads, database row
- * shapes and AI extraction schemas. Server, web client and any future mobile
- * client all import from here so the 4-person team can work in parallel
- * against one contract.
+ * The handover model is deliberately small: a project owns sources, sources
+ * become chunks, chunks produce evidence-linked claims, and an approved
+ * handover freezes a snapshot of those claims for a role-scoped recipient.
  */
-import { z } from 'zod';
 
 // ---------------------------------------------------------------------------
-// Users & roles
+// Project access
 // ---------------------------------------------------------------------------
 
-export const MemberRole = z.enum(['manager', 'reviewer', 'recipient']);
-export type MemberRole = z.infer<typeof MemberRole>;
+export const MEMBER_ROLES = ['manager', 'reviewer', 'recipient'] as const;
+export type MemberRole = (typeof MEMBER_ROLES)[number];
+
+/** What an incoming person is allowed to see. Chosen by the project manager. */
+export const RECIPIENT_SCOPES = ['engineer', 'manager', 'coordinator', 'general'] as const;
+export type RecipientScope = (typeof RECIPIENT_SCOPES)[number];
 
 export interface Profile {
-  id: string; // Supabase auth user id
+  id: string;
   email: string;
   display_name: string;
-  created_at: string;
 }
 
 export interface ProjectMember {
@@ -27,277 +28,249 @@ export interface ProjectMember {
   project_id: string;
   user_id: string;
   role: MemberRole;
-  display_name?: string;
-  email?: string;
+  scope: RecipientScope;
+  email: string | null;
+  display_name: string | null;
   created_at: string;
 }
-
-// ---------------------------------------------------------------------------
-// Projects
-// ---------------------------------------------------------------------------
 
 export interface Project {
   id: string;
   name: string;
-  description: string | null;
-  owner_id: string; // created by (manager)
+  description: string;
+  owner_id: string;
   created_at: string;
-  updated_at: string;
+}
+
+export interface ProjectSummary extends Project {
+  role: MemberRole;
+  scope: RecipientScope;
+  source_count: number;
+  claim_count: number;
+  approved_handover: { id: string; version: number; approved_at: string } | null;
 }
 
 // ---------------------------------------------------------------------------
-// Sources
+// Sources and evidence
 // ---------------------------------------------------------------------------
 
-export const SourceType = z.enum(['document', 'github']);
-export type SourceType = z.infer<typeof SourceType>;
+export type SourceStatus = 'ready' | 'failed';
 
-export const SourceStatus = z.enum(['processing', 'ready', 'failed']);
-export type SourceStatus = z.infer<typeof SourceStatus>;
-
-/**
- * A "piece" is one retrievable unit of a source: a page, a section heading,
- * an issue, a commit message. Every piece carries a location string that the
- * evidence layer links claims back to, plus an external URL when one exists
- * (GitHub issue URL etc.) so the reviewer can jump to the original.
- */
-export interface SourcePiece {
-  id: string;
-  source_id: string;
-  idx: number; // ordering within the source
-  label: string; // human-readable location, e.g. "Architecture.pdf — page 3"
-  location: string; // stable anchor, e.g. "page:3" or "issue:12" or "file:docs/api.md"
-  text: string;
-  url: string | null;
-}
-
-export interface Source {
+export interface ProjectSource {
   id: string;
   project_id: string;
-  type: SourceType;
   title: string;
+  filename: string;
+  byte_size: number;
   status: SourceStatus;
-  created_by: string;
-  /** For github sources: "owner/repo". For documents: original filename. */
-  external_ref: string | null;
-  metadata: Record<string, unknown>;
+  error: string | null;
+  chunk_count: number;
   created_at: string;
 }
 
 // ---------------------------------------------------------------------------
-// Claims — the recognised project knowledge
+// Claims
 // ---------------------------------------------------------------------------
 
-export const ClaimCategory = z.enum([
+export const CLAIM_CATEGORIES = [
   'decision',
-  'task',
-  'risk',
-  'dependency',
+  'completed',
+  'pending',
+  'next_action',
   'owner',
-  'setup',
   'contact',
-  'other',
-]);
-export type ClaimCategory = z.infer<typeof ClaimCategory>;
+  'risk',
+  'blocker',
+  'dependency',
+  'setup',
+] as const;
+export type ClaimCategory = (typeof CLAIM_CATEGORIES)[number];
 
-/**
- * Evidence status. `unsupported` means the model stated something with no
- * source behind it — it is never shown as fact and needs reviewer action.
- * `conflicting` means two sources (or the model and a source) disagree.
- */
-export const ClaimStatus = z.enum(['supported', 'needs_review', 'conflicting', 'unsupported']);
-export type ClaimStatus = z.infer<typeof ClaimStatus>;
+export const CLAIM_STATUSES = ['supported', 'needs_review', 'conflicting', 'unsupported'] as const;
+export type ClaimStatus = (typeof CLAIM_STATUSES)[number];
 
-export const REVIEW_NOTE = 'needs-review';
-export const OWNER_UNCONFIRMED = 'Owner not confirmed';
+export const REVIEW_STATES = ['pending', 'verified', 'excluded', 'redacted'] as const;
+export type ReviewState = (typeof REVIEW_STATES)[number];
+
+export interface ClaimEvidence {
+  source_id: string;
+  source_title: string;
+  chunk_id: string;
+  location: string;
+  quote: string | null;
+}
 
 export interface Claim {
   id: string;
   project_id: string;
   category: ClaimCategory;
   text: string;
-  /** The "why" behind a decision — only ever set when a source states it. */
+  original_text: string;
   reasoning: string | null;
   owner_text: string | null;
   status: ClaimStatus;
-  /** 0..1 model self-assessment; informational only, never permission-driving. */
   confidence: number;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface ClaimEvidence {
-  id: string;
-  claim_id: string;
-  source_id: string;
-  piece_id: string | null;
-  label: string;
-  location: string;
-  url: string | null;
-  quote: string | null;
+  conflict_group: string | null;
+  review_state: ReviewState;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  evidence: ClaimEvidence;
   created_at: string;
 }
 
-/** A claim joined with its evidence rows, as the API returns. */
-export interface ClaimWithEvidence extends Claim {
-  evidence: ClaimEvidence[];
-}
+export const OWNER_UNCONFIRMED = 'Owner not confirmed';
 
 // ---------------------------------------------------------------------------
-// Handover versions
+// Handover sections
 // ---------------------------------------------------------------------------
 
-export const HandoverStatus = z.enum(['draft', 'approved', 'rejected']);
-export type HandoverStatus = z.infer<typeof HandoverStatus>;
-
-/**
- * Per-claim state inside a handover version. The reviewer can edit text,
- * reject a claim entirely, or redact it from recipient views.
- */
-export interface HandoverClaimReview {
-  claim_id: string;
-  edited_text: string | null;
-  action: 'include' | 'reject';
-  redact_from_recipients: boolean;
-  verified_by_reviewer: boolean;
-}
-
-export interface Handover {
-  id: string;
-  project_id: string;
-  version: number;
-  status: HandoverStatus;
-  /** Snapshot of per-claim review state at save time. */
-  claim_reviews: HandoverClaimReview[];
-  /** Free-form reviewer note shown to recipients. */
-  reviewer_note: string | null;
-  created_by: string;
-  created_at: string;
-  approved_at: string | null;
-  approved_by: string | null;
-}
-
-// ---------------------------------------------------------------------------
-// Recipients & acknowledgement
-// ---------------------------------------------------------------------------
-
-export const RecipientRoleTag = z.enum(['engineer', 'manager', 'coordinator', 'general']);
-export type RecipientRoleTag = z.infer<typeof RecipientRoleTag>;
-
-/**
- * Recipients see only: project-level handover sections, their role tag, and
- * claims that are included AND not redacted. Categories outside their scope
- * are additionally hidden role-appropriately.
- */
-export interface Acknowledgement {
-  id: string;
-  handover_id: string;
-  user_id: string;
-  acknowledged_at: string;
-}
-
-// ---------------------------------------------------------------------------
-// Audit log
-// ---------------------------------------------------------------------------
-
-export interface AuditEntry {
-  id: string;
-  project_id: string;
-  actor_id: string;
-  actor_email: string | null;
-  action: string; // e.g. "source.connect", "extraction.run", "handover.approve"
-  detail: Record<string, unknown>;
-  created_at: string;
-}
-
-// ---------------------------------------------------------------------------
-// GitHub connector
-// ---------------------------------------------------------------------------
-
-export interface GitHubConnectRequest {
-  project_id: string;
-  repo: string; // "owner/repo"
-  /** Repo-scoped token, used at connection time only, never stored. */
-  token?: string;
-}
-
-// ---------------------------------------------------------------------------
-// AI extraction (Groq) — strict schema, validated before persisting
-// ---------------------------------------------------------------------------
-
-export interface ExtractionRequest {
-  project_id: string;
-}
-
-export interface ExtractionResultSummary {
-  pieces: number;
-  claims_created: number;
-  claims_conflicting: number;
-  unsupported_flagged: number;
-  /** Grounded by the model but whose quote could not be verified verbatim. */
-  needs_review_flagged: number;
-  deduped: number;
-}
-
-/**
- * What the model may emit per analysed piece. Anything outside this strict
- * shape is dropped. The model is instructed that emitting an owner that is
- * not in the text is forbidden; unknown owners must produce
- * `owner_text: null` and the system writes OWNER_UNCONFIRMED itself.
- */
-export const ExtractedClaimSchema = z.object({
-  category: ClaimCategory,
-  text: z.string().min(1),
-  reasoning: z.string().nullable().optional(),
-  owner_text: z.string().nullable().optional(),
-  quote: z.string().nullable().optional(),
-  unsupported: z.boolean().optional(),
-});
-export type ExtractedClaim = z.infer<typeof ExtractedClaimSchema>;
-
-// ---------------------------------------------------------------------------
-// API envelopes
-// ---------------------------------------------------------------------------
-
-export interface ApiError {
-  error: string;
-}
-
-export const HANDOVER_SECTIONS = [
+export const SECTION_KEYS = [
   'overview',
   'completed',
   'pending',
-  'key_decisions',
+  'decisions',
   'ownership',
   'risks',
   'dependencies',
   'next_actions',
   'open_questions',
 ] as const;
-export type HandoverSection = (typeof HANDOVER_SECTIONS)[number];
+export type SectionKey = (typeof SECTION_KEYS)[number];
 
-/** Which claim categories land in which handover report section. */
-export const SECTION_BY_CATEGORY: Record<ClaimCategory, HandoverSection> = {
-  decision: 'key_decisions',
-  task: 'pending',
-  risk: 'risks',
-  dependency: 'dependencies',
-  owner: 'ownership',
-  setup: 'overview',
-  contact: 'ownership',
-  other: 'open_questions',
+export const SECTION_TITLES: Record<SectionKey, string> = {
+  overview: 'Project overview',
+  completed: 'Completed work',
+  pending: 'Pending work',
+  decisions: 'Key decisions',
+  ownership: 'Ownership',
+  risks: 'Risks and blockers',
+  dependencies: 'Dependencies',
+  next_actions: 'Next actions',
+  open_questions: 'Open questions',
 };
 
-/** Recipient role tags scope which sections they can see. */
-export const SECTIONS_BY_RECIPIENT_ROLE: Record<RecipientRoleTag, HandoverSection[] | 'all'> = {
-  engineer: 'all',
-  manager: 'all',
-  coordinator: [
+export const SECTION_BLURBS: Record<SectionKey, string> = {
+  overview: 'What the project does, its current phase and how it is set up.',
+  completed: 'Work the sources describe as done.',
+  pending: 'Open tasks and unfinished deliverables.',
+  decisions: 'Choices that shaped the project, with the reason where recorded.',
+  ownership: 'Who owns what, where the sources name a person.',
+  risks: 'Known risks, blockers and unverified assumptions.',
+  dependencies: 'Systems, people and approvals other work relies on.',
+  next_actions: 'Prioritised steps for the incoming person.',
+  open_questions: 'Gaps and contradictions that need a human answer.',
+};
+
+const SECTION_FOR_CATEGORY: Record<ClaimCategory, SectionKey> = {
+  decision: 'decisions',
+  completed: 'completed',
+  pending: 'pending',
+  next_action: 'next_actions',
+  owner: 'ownership',
+  contact: 'ownership',
+  risk: 'risks',
+  blocker: 'risks',
+  dependency: 'dependencies',
+  setup: 'overview',
+};
+
+export function sectionForCategory(category: ClaimCategory): SectionKey {
+  return SECTION_FOR_CATEGORY[category];
+}
+
+/**
+ * Section visibility per incoming role. The server is the only authority here:
+ * the client never sends a scope, it is read from the member's row.
+ */
+export const SECTIONS_BY_SCOPE: Record<RecipientScope, SectionKey[]> = {
+  engineer: [...SECTION_KEYS],
+  manager: [
     'overview',
+    'completed',
     'pending',
+    'decisions',
     'ownership',
+    'risks',
+    'dependencies',
     'next_actions',
     'open_questions',
   ],
-  general: ['overview', 'next_actions'],
+  coordinator: ['overview', 'pending', 'ownership', 'dependencies', 'next_actions', 'open_questions'],
+  general: ['overview', 'pending', 'next_actions'],
+};
+
+export interface HandoverSection {
+  key: SectionKey;
+  title: string;
+  blurb: string;
+  claims: HandoverClaim[];
+}
+
+/** A frozen claim inside an approved handover snapshot. */
+export interface HandoverClaim {
+  id: string;
+  category: ClaimCategory;
+  text: string;
+  status: ClaimStatus;
+  owner_text: string | null;
+  review_state: ReviewState;
+  evidence: ClaimEvidence;
+}
+
+export interface HandoverVersion {
+  id: string;
+  project_id: string;
+  version: number;
+  status: 'draft' | 'approved' | 'rejected' | 'superseded';
+  note: string | null;
+  created_at: string;
+  approved_at: string | null;
+}
+
+export interface HandoverDetail extends HandoverVersion {
+  project: { id: string; name: string };
+  sections: HandoverSection[];
+  stats: { total: number; supported: number; needs_review: number; conflicting: number; excluded: number; redacted: number };
+  acknowledgements: { user_id: string; display_name: string | null; acknowledged_at: string }[];
+}
+
+export interface RecipientView {
+  handover: { id: string; version: number; approved_at: string; status: string };
+  project: { id: string; name: string };
+  scope: RecipientScope;
+  scope_note: string;
+  sections: HandoverSection[];
+  hidden_claim_count: number;
+  acknowledged_at: string | null;
+  reviewer_note: string | null;
+}
+
+export interface AuditEntry {
+  id: string;
+  project_id: string;
+  actor_id: string | null;
+  actor_name: string | null;
+  action: string;
+  target_type: string;
+  target_id: string | null;
+  detail: Record<string, unknown> | null;
+  created_at: string;
+}
+
+export interface ExtractionSummary {
+  chunks: number;
+  claims_created: number;
+  duplicates_skipped: number;
+  conflicts: number;
+  unsupported: number;
+  needs_review: number;
+  owner_gaps: number;
+  sources_failed: string[];
+}
+
+export const SCOPE_DESCRIPTIONS: Record<RecipientScope, string> = {
+  engineer: 'Full technical view: every section, including decisions and setup detail.',
+  manager: 'Delivery view: overview, decisions, ownership, risks, dependencies and next actions.',
+  coordinator: 'Coordination view: pending work, ownership, dependencies and next actions.',
+  general: 'Minimal view: overview, pending work and next actions.',
 };

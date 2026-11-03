@@ -6,7 +6,7 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      // Dev proxy keeps the browser single-origin; the API doubles CORS anyway.
+      // Keep the browser on one origin in development; the API also allows CORS.
       '/api': 'http://localhost:4000',
     },
   },

@@ -1,38 +1,47 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import WebSocket from 'ws';
 import { config } from './config.js';
 
-/**
- * Service-role client. Parametrised functions in the *route layer* enforce
- * permission checks before any call, and RLS is the second line of defence
- * for anything routed through clients. This client bypasses RLS, so it is
- * never returned to or used outside this process.
- */
-let cached: SupabaseClient | null = null;
-
-export function serviceClient(): SupabaseClient {
-  if (!cached) importSupabase();
-  return cached!;
+// Node < 22 has no global WebSocket and supabase-js builds its Realtime client
+// eagerly, so any query would throw without this shim.
+if (!globalThis.WebSocket) {
+  globalThis.WebSocket = WebSocket as unknown as typeof globalThis.WebSocket;
 }
 
-function importSupabase() {
-  if (!config.supabaseUrl || !config.supabaseServiceKey) {
-    throw new Error('Supabase env vars missing — set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY');
-  }
-  cached = createClient(config.supabaseUrl, config.supabaseServiceKey, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
-}
-
-/** Tables / column names used with the service client. */
 export const Tables = {
   profiles: 'profiles',
   projects: 'projects',
   projectMembers: 'project_members',
   sources: 'sources',
-  sourcePieces: 'source_pieces',
+  sourceChunks: 'source_chunks',
   claims: 'claims',
-  claimEvidence: 'claim_evidence',
   handovers: 'handovers',
   acknowledgements: 'acknowledgements',
   auditLog: 'audit_log',
 } as const;
+
+let service: SupabaseClient | null = null;
+let anonymous: SupabaseClient | null = null;
+
+/**
+ * Service-role client. Every route performs its own permission check first;
+ * RLS is the second line of defence, not the first.
+ */
+export function serviceClient(): SupabaseClient {
+  if (!service) {
+    service = createClient(config.supabaseUrl, config.supabaseServiceKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+  }
+  return service;
+}
+
+/** Anonymous client, only used to exchange a password for a session. */
+export function anonClient(): SupabaseClient {
+  if (!anonymous) {
+    anonymous = createClient(config.supabaseUrl, config.supabaseAnonKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+  }
+  return anonymous;
+}

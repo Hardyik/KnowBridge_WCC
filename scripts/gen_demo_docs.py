@@ -1,187 +1,227 @@
+"""Generate the synthetic Ledgerline demo documents.
+
+The set is deliberately imperfect: two documents disagree about the webhook
+retry queue, one contains a credential that must be redacted before sharing,
+and one decision names nobody, which leaves an ownership gap for the reviewer.
+
+Run: python scripts/gen_demo_docs.py
 """
-Demo data generator (synthetic, per doc §8): produces the KnowBridge demo
-document set for the "SafeSense — hazard reporting" handover scenario.
 
-The repository connected in the demo is github.com/Hardyik/SafeSense
-(Flutter app + Flask/MySQL backend + three YOLO hazard models). These
-documents are the synthetic handover material the outgoing team left
-behind — same project, so extracted claims and repository evidence line
-up for a judge.
-
-Planted for the judge walkthrough (proposal §5.4):
-  1. A key decision WITH its reasoning and a named owner   -> supported claim
-  2. A decision with no owner named anywhere               -> "Owner not confirmed"
-  3. Two documents that contradict each other on the flood
-     model rollout state                                   -> conflicting claims
-  4. A credential/risk item a reviewer must redact before
-     sharing with the incoming person                      -> redaction demo
-
-Run:  python scripts/gen_demo_docs.py
-"""
 from pathlib import Path
 
 from docx import Document
 from reportlab.lib.pagesizes import A4
-from reportlab.pdfgen import canvas
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
 
-ROOT = Path(__file__).resolve().parent.parent
-DOCS = ROOT / "demo-data" / "documents"
-DOCS.mkdir(parents=True, exist_ok=True)
+OUT = Path(__file__).resolve().parent.parent / "demo-data" / "documents"
+OUT.mkdir(parents=True, exist_ok=True)
+
+HANDOVER = """# Ledgerline payments migration — handover notes
+
+## Overview
+Ledgerline is the checkout and settlement service for our merchant portal. The team is
+replacing the legacy transaction processor with a set of Node services. At the time of
+writing, the migration is roughly 70 percent complete: card payments run on the new
+pathway, bank transfer settlement is still on the legacy system.
+
+## Current phase
+The project is in a controlled pilot with three merchants. We have not announced a
+general availability date. Priya Raman owns the pilot rollout and reports weekly.
+
+## Decisions
+We replaced vendor session cookies with short lived JWT access tokens so the mobile app
+can authenticate without a server session. The reasoning was that the Flutter client
+could not reliably persist cookies across app restarts.
+
+We decided to keep the reconciliation report generation in the legacy PHP service for
+this phase. Rewriting it would have delayed the pilot by an estimated six weeks.
+
+We chose to store merchant settlement exports on the application server instead of the
+old managed object store, because the procurement review for the managed store had not
+finished.
+
+## Completed work
+The chargeback webhook handler is deployed and processing production traffic. Merchant
+onboarding now goes through the new admin API. The OpenAPI contract for the payment
+initiation endpoint is published and pinned in the client SDK.
+
+## Pending work
+Bank transfer settlement still routes through the legacy processor. The merchant
+self-service screen for settlement exports is not started. Rate limiting on the public
+payment endpoints is configured but not load tested.
+
+## Ownership
+Dana Okafor owns the settlement migration and the vendor relationship.
+Priya Raman owns the pilot rollout and merchant communications.
+Tomas Berg owns the reconciliation service and the legacy PHP integration.
+
+## Next actions
+Book a joint session with the vendor to confirm the sandbox cutover date.
+Add an alert when chargeback webhook failures exceed one percent over ten minutes.
+Publish the settlement export screen design for review before implementation starts.
+
+## Open questions
+Do we keep the legacy processor licenced past December, or pay for early termination?
+Who signs off on the merchant data retention window that the exports now follow?
+"""
+
+RUNBOOK = """Ops runbook — Ledgerline payments
+
+Deployment steps
+1. Build the API image with npm run build and publish it to the internal registry.
+2. Apply database migrations with the migration runner before starting the new image.
+3. Restart the payment worker and confirm the queue depth returns to zero.
+4. Open the admin console and verify the health panel shows green for payments.
+
+Environment setup
+The service reads DATABASE_URL, JWT_SECRET and VENDOR_API_BASE from the environment.
+Copy .env.example to .env for local work. Never commit the filled file.
+
+Known issues
+The webhook retry queue is not yet deployed and remains blocked on vendor approval.
+Until it ships, failed chargeback webhooks must be replayed manually from the admin
+console.
+
+The old vendor sandbox key is still active and was never revoked after the prototype
+handed over. Rotate it before any external demo.
+
+The reconciliation job occasionally times out on the last business day of the month
+because the legacy PHP service holds a long transaction. Restarting the job is safe.
+
+Dependencies
+Vendor approval is required before the retry queue can be enabled in production.
+The firewall team must allow inbound traffic on port 8443 for the settlement callback.
+The finance team approves every change to the settlement export format.
+
+Rollback
+Keep the previous image tag available for two weeks. Rolling back requires replaying the
+queue manually because the new worker acknowledges messages differently.
+"""
+
+STATUS = """STATUS UPDATE — week 12, Ledgerline payments migration
+
+Overall the migration is tracking to plan. Card payments have been on the new pathway
+for five weeks with no settlement incidents.
+
+The webhook retry queue is deployed and live for all merchants, so manual replay of
+chargeback webhooks is no longer required.
+
+Pilot feedback from the three merchants is positive. Two asked for a settlement export
+download; that work is scheduled for the next sprint.
+
+Open risks: the reconciliation timeout on the last business day of the month is still
+unresolved, and the legacy processor licence renewal is due in December.
+"""
+
+CONTACTS = """Team contacts and ownership
+
+Dana Okafor — payments lead, owns settlement migration and the vendor relationship.
+Reach her on the #payments channel for anything touching bank transfers.
+
+Priya Raman — pilot rollout and merchant communications. She is the person to ask
+before contacting a pilot merchant.
+
+Tomas Berg — reconciliation service and legacy PHP integration. Ask him about month end
+timeouts and the settlement export format.
+
+Security lead — Meera Iyer. Contact her immediately for any suspected credential leak;
+she owns key rotation and the vendor security review.
+"""
 
 
-def _text_page(c: canvas.Canvas, title: str, body: list[str], page: int) -> None:
-    c.setFont("Helvetica-Bold", 15)
-    c.drawString(72, 800, title)
-    c.setFont("Helvetica", 10.5)
-    y = 775
-    for para in body:
-        for line in para.split("\n"):
-            c.drawString(72, y, line)
-            y -= 16
-        y -= 6
-    c.setFont("Helvetica", 8)
-    c.drawRightString(540, 40, f"SafeSense handover — synthetic demo document, page {page}")
-    c.showPage()
+def write_text() -> None:
+    (OUT / "handover-notes.md").write_text(HANDOVER, encoding="utf-8")
+    (OUT / "status-update.txt").write_text(STATUS, encoding="utf-8")
+    (OUT / "ops-runbook.md").write_text(RUNBOOK, encoding="utf-8")
+    (OUT / "contacts.md").write_text(CONTACTS, encoding="utf-8")
 
 
-def gen_decisions_pdf(path: Path) -> None:
-    """decisions.pdf: 2 pages, decision + reasoning + owner on p1; p2 decision WITHOUT owner."""
-    c = canvas.Canvas(str(path), pagesize=A4)
-
-    _text_page(
-        c,
-        "SafeSense — Architecture Decision Record (draft 2)",
-        [
-            "",
-            "Decision: Hazard detection stays server-side in the Flask backend",
-            "using the three YOLO model files, instead of running inference",
-            "on-device inside the Flutter app.",
-            "",
-            "Reasoning: On-device inference could not finish inside two seconds",
-            "on the low-end Android phones used in the pilot, and every model",
-            "update would have required a Play Store release. Keeping the",
-            "models behind the Flask API lets us ship a new .pt file without",
-            "touching the mobile client, and the app only needs the API base",
-            "URL (configured through dart-define or lib/config/app_config.dart).",
-            "",
-            "Backend owner: Meera Iyer (Flask API and model serving).",
-            "Mobile owner: Priya Sharma (Flutter client, release builds).",
-            "",
-            "Approved in the architecture review on 12 March 2026.",
-        ],
-        1,
-    )
-
-    _text_page(
-        c,
-        "SafeSense — Architecture Decision Record (draft 2), continued",
-        [
-            "",
-            "Related decision: The Firebase storage bucket used by the first",
-            "prototype is retired. Uploaded photos are written to local disk",
-            "on the API host and referenced from the MySQL uploaded_image",
-            "column, matching the 100% local architecture in the README.",
-            "",
-            "NOTE: This retirement decision was recorded without a named owner.",
-            "The original author left the team before it was written down, and",
-            "no review note assigns one. The incoming engineer must confirm who",
-            "owns revoking the old Firebase credentials.",
-            "",
-            "Open question: video-based hazard detection was proposed during",
-            "the pilot but was never evaluated or scoped.",
-        ],
-        2,
-    )
-
-    c.save()
-
-
-def gen_status_docx(path: Path) -> None:
-    """status.docx: claims the flood model rollout is COMPLETE (conflicts with the runbook)."""
+def write_docx() -> None:
     doc = Document()
-    doc.add_heading("SafeSense — Status Memo", level=1)
+    doc.add_heading("Decision log — Ledgerline payments", level=1)
 
-    doc.add_heading("Rollout status", level=2)
+    doc.add_heading("March 2026 — Settlement export storage", level=2)
     doc.add_paragraph(
-        "The flood hazard model rollout is complete and live for all users. "
-        "hazard_best.pt, flood_best.pt and hazard_fire_building_best.pt are "
-        "all serving traffic from the Flask backend."
+        "Decision: keep settlement exports on the application server for the pilot. "
+        "Reason: the managed object store procurement review was still open and the pilot "
+        "date could not move."
     )
+    doc.add_paragraph("Owner: Dana Okafor.")
 
-    doc.add_heading("Delivered this cycle", level=2)
+    doc.add_heading("April 2026 — Token based authentication", level=2)
     doc.add_paragraph(
-        "Admin dashboard shipped with alert review and user promotion. "
-        "Emergency contacts, location shares and risk zones are backed by "
-        "the migration script 001_add_new_tables.sql."
+        "Decision: replace vendor session cookies with short lived JWT access tokens. "
+        "Reason: the Flutter client could not persist cookies reliably across restarts."
     )
+    doc.add_paragraph("Owner: Tomas Berg.")
 
-    doc.add_heading("Known gaps", level=2)
+    doc.add_heading("April 2026 — Sandbox credential cleanup", level=2)
     doc.add_paragraph(
-        "The Firebase retirement decision still has no named owner, and the "
-        "release checklist omits the JWT secret rotation step."
+        "Decision: the old sandbox key was revoked in March and replaced with a key stored "
+        "in the shared secret manager. Do not re-enable the old key."
     )
-    doc.save(str(path))
-
-
-def gen_runbook(path: Path) -> None:
-    path.write_text(
-        """SafeSense — Ops Runbook (excerpt)
-
-Section: Backend deployment
-The Flask API runs on the university VM behind the campus network. Deploy
-by pulling the Backend folder, reinstalling requirements.txt, importing
-schema.sql (or the newest migration) and restarting the service.
-Deployment owner for the VM: Meera Iyer.
-
-Section: Mobile release
-Build the release APK with the API base URL baked in:
-
-    flutter build apk --release --dart-define=API_BASE_URL=http://<LAN-IP>:5000
-
-The manifest allows cleartext LAN traffic, so the phone and the VM must be
-on the same network. Release owner: Priya Sharma.
-
-Section: Credentials
-Database credentials and JWT_SECRET live in Backend/.env and must never be
-committed. The old Firebase storage bucket is still reachable — its
-service account key was never revoked after the prototype was retired.
-
-Section: Rollout status
-The flood hazard model rollout is pending and has not been released to
-users. Only hazard_best.pt and hazard_fire_building_best.pt are approved
-for the pilot; flood_best.pt still needs a second accuracy pass on the
-labelled flood images collected in February.
-
-Section: Missing
-Nobody documented how the risk-zone polygons were generated, and the
-labelled dataset used to train the three models is not stored with the
-repository. Treat both as open questions for the incoming engineer.
-""",
-        encoding="utf-8",
+    doc.add_paragraph(
+        "No owner was recorded for the key rotation follow up; this must be confirmed "
+        "before the next vendor review."
     )
 
-
-def gen_contacts(path: Path) -> None:
-    path.write_text(
-        """# SafeSense — Contacts
-
-| Area | Contact | When to involve |
-| --- | --- | --- |
-| Model accuracy | Meera Iyer, backend and models | any change to flood_best.pt or hazard thresholds |
-| Mobile release | Priya Sharma, Flutter client | APK builds, API base URL, Play/APK distribution |
-| Campus infrastructure | Arun Desai, university IT | VM access, firewall rules, LAN addressing |
-| Security review | Dana Okafor, AppSec | anything touching JWT_SECRET or database credentials |
-
-Escalation: model regressions go to Meera first; anything that exposes the
-database or the .env file pages Dana immediately.
-""",
-        encoding="utf-8",
+    doc.add_heading("May 2026 — Reconciliation rewrite deferred", level=2)
+    doc.add_paragraph(
+        "Decision: the reconciliation report generator stays on the legacy PHP service for "
+        "this phase. Rewriting it would delay the pilot by roughly six weeks."
     )
+    doc.add_paragraph("Owner: Tomas Berg.")
+
+    doc.save(OUT / "decision-log.docx")
+
+
+def write_pdf() -> None:
+    styles = getSampleStyleSheet()
+    story = [
+        Paragraph("Steering meeting — Ledgerline payments", styles["Title"]),
+        Spacer(1, 12),
+        Paragraph(
+            "Attendees: Dana Okafor, Priya Raman, Tomas Berg, Meera Iyer. "
+            "Meeting held in week 11 of the migration.",
+            styles["BodyText"],
+        ),
+        Spacer(1, 10),
+        Paragraph("Decisions taken", styles["Heading2"]),
+        Paragraph(
+            "The group agreed to hold general availability until the webhook retry queue is "
+            "approved by the vendor. The pilot stays limited to three merchants in the meantime.",
+            styles["BodyText"],
+        ),
+        Paragraph(
+            "Security asked for every sandbox credential to be rotated before the vendor "
+            "review in June. Meera Iyer owns that rotation.",
+            styles["BodyText"],
+        ),
+        Spacer(1, 10),
+        Paragraph("Risks raised", styles["Heading2"]),
+        Paragraph(
+            "The settlement export format is not versioned. Finance warned that changing it "
+            "after the pilot will require a migration for three merchants.",
+            styles["BodyText"],
+        ),
+        Paragraph(
+            "The reconciliation job holds a long transaction on month end and has timed out "
+            "twice, delaying settlement confirmations by a day.",
+            styles["BodyText"],
+        ),
+        Spacer(1, 10),
+        Paragraph("Actions", styles["Heading2"]),
+        Paragraph("Priya Raman to confirm the vendor approval date with procurement.", styles["BodyText"]),
+        Paragraph("Tomas Berg to add a month end reconciliation alert.", styles["BodyText"]),
+        Paragraph("Dana Okafor to document the manual webhook replay procedure.", styles["BodyText"]),
+    ]
+    SimpleDocTemplate(str(OUT / "steering-notes.pdf"), pagesize=A4).build(story)
 
 
 if __name__ == "__main__":
-    gen_decisions_pdf(DOCS / "decisions.pdf")
-    gen_status_docx(DOCS / "status.docx")
-    gen_runbook(DOCS / "ops-runbook.txt")
-    gen_contacts(DOCS / "contacts.md")
-    print(f"Demo documents written to {DOCS}")
+    write_text()
+    write_docx()
+    write_pdf()
+    for path in sorted(OUT.iterdir()):
+        print(f"{path.name}: {path.stat().st_size} bytes")

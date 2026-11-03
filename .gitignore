@@ -11,3 +11,6 @@ build/
 *.tsbuildinfo
 web/dist/
 .DS_Store
+
+# Local chat attachments (may contain pasted secrets)
+.cloud-attachments/
