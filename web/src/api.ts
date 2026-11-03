@@ -1,6 +1,14 @@
 // Relative by default (Vite proxies /api in development). A deployed frontend
-// points at the API origin with VITE_API_URL.
-const BASE = (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, '') ?? '/api';
+// points at the API origin with VITE_API_URL; the /api prefix is added unless the
+// value already carries it, so both https://api.example.com and
+// https://api.example.com/api work.
+function resolveBase(): string {
+  const configured = (import.meta.env.VITE_API_URL as string | undefined)?.trim().replace(/\/+$/, '');
+  if (!configured) return '/api';
+  return configured.endsWith('/api') ? configured : `${configured}/api`;
+}
+
+const BASE = resolveBase();
 const TOKEN_KEY = 'knowbridge.token';
 
 export class ApiError extends Error {
