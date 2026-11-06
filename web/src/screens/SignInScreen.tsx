@@ -28,7 +28,7 @@ export default function SignInScreen() {
   return (
     <div className="layout-auth">
       <section className="auth-hero">
-        <span className="badge cat">Round 2 build · Fallen Crows</span>
+        <span className="badge cat">Round 3 build · Fallen Crows</span>
         <h1>Hand over the work, not the guesswork.</h1>
         <p className="muted">
           KnowBridge turns project documents into a reviewable handover where every statement

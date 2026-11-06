@@ -1,24 +1,35 @@
 import { Router } from 'express';
 import { z } from 'zod';
+import { randomBytes } from 'node:crypto';
 import {
   Claim,
   ClaimCategory,
   ClaimStatus,
+  Confidentiality,
+  DeliveryLink,
+  DeliveryStatus,
   HandoverClaim,
   HandoverDetail,
+  HandoverDiff,
   HandoverSection,
   HandoverVersion,
   MemberRole,
   RecipientScope,
   ReviewState,
+  RECIPIENT_SCOPES,
   SCOPE_DESCRIPTIONS,
   SECTION_KEYS,
   SECTION_TITLES,
   SECTION_BLURBS,
-  SECTIONS_BY_SCOPE,
   SectionKey,
+  SourceKind,
   sectionForCategory,
 } from '@knowbridge/shared';
+import { config } from '../config.js';
+import { scopedSections, withCurrentTiers } from '../services/scoping.js';
+import { attachCorroborations } from '../services/corroboration.js';
+import { normalise } from '../services/documents.js';
+import { similarText } from '../services/similarity.js';
 import {
   asyncHandler,
   audit,
@@ -63,8 +74,13 @@ interface RawClaim {
   chunk_id: string;
   location: string;
   quote: string | null;
+  occurred_at: string | null;
+  confidentiality: Confidentiality | null;
   created_at: string;
-  sources?: { title: string } | { title: string }[] | null;
+  sources?:
+    | { title: string; kind?: SourceKind; confidentiality?: Confidentiality }
+    | { title: string; kind?: SourceKind; confidentiality?: Confidentiality }[]
+    | null;
 }
 
 const createDraft = z.object({ note: z.string().max(1000).optional() });
@@ -93,6 +109,10 @@ function toClaim(raw: RawClaim): Claim {
       location: raw.location,
       quote: raw.quote,
     },
+    source_kind: (embedded?.kind as SourceKind) ?? 'document',
+    confidentiality: (embedded?.confidentiality as Confidentiality) ?? 'internal',
+    occurred_at: raw.occurred_at,
+    corroborations: [],
     created_at: raw.created_at,
   };
 }
@@ -100,11 +120,11 @@ function toClaim(raw: RawClaim): Claim {
 async function loadClaims(projectId: string): Promise<Claim[]> {
   const { data, error } = await serviceClient()
     .from(Tables.claims)
-    .select('*, sources(title)')
+    .select('*, sources(title, kind, confidentiality)')
     .eq('project_id', projectId)
     .order('created_at', { ascending: true });
   if (error) throw new HttpError(500, error.message);
-  return (data ?? []).map((row) => toClaim(row as RawClaim));
+  return attachCorroborations((data ?? []).map((row) => toClaim(row as RawClaim)));
 }
 
 function toHandoverClaim(claim: Claim): HandoverClaim {
@@ -116,6 +136,9 @@ function toHandoverClaim(claim: Claim): HandoverClaim {
     owner_text: claim.owner_text,
     review_state: claim.review_state,
     evidence: claim.evidence,
+    source_kind: claim.source_kind,
+    confidentiality: claim.confidentiality,
+    occurred_at: claim.occurred_at,
   };
 }
 
@@ -386,14 +409,10 @@ router.get(
       throw new HttpError(409, 'This handover has not been approved yet');
     }
 
-    const sections = handover.snapshot?.sections ?? [];
-    const allowed = new Set(SECTIONS_BY_SCOPE[membership.scope]);
-    const visible = sections
-      .filter((s) => allowed.has(s.key))
-      .map((s) => ({ ...s, claims: s.claims.filter((c) => c.review_state !== 'redacted') }));
-
-    const totalClaims = sections.reduce((sum, s) => sum + s.claims.length, 0);
-    const visibleClaims = visible.reduce((sum, s) => sum + s.claims.length, 0);
+    const { sections: visible, hidden_claim_count } = scopedSections(
+      await withCurrentTiers(handover.snapshot?.sections ?? []),
+      membership.scope,
+    );
 
     const { data: ack } = await serviceClient()
       .from(Tables.acknowledgements)
@@ -426,7 +445,7 @@ router.get(
       scope: membership.scope,
       scope_note: SCOPE_DESCRIPTIONS[membership.scope],
       sections: visible,
-      hidden_claim_count: totalClaims - visibleClaims,
+      hidden_claim_count,
       acknowledged_at: (ack?.acknowledged_at as string) ?? null,
       reviewer_note: handover.note,
     });
@@ -455,6 +474,344 @@ router.post(
 
     await audit(handover.project_id, profile.id, 'handover.acknowledged', 'handover', handover.id, null);
     res.json({ ok: true });
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// Version comparison and rollback
+// ---------------------------------------------------------------------------
+
+function flatten(sections: HandoverSection[]): Map<string, HandoverClaim> {
+  const map = new Map<string, HandoverClaim>();
+  for (const section of sections) {
+    for (const claim of section.claims) map.set(claim.id, claim);
+  }
+  return map;
+}
+
+router.get(
+  '/handovers/:handoverId/diff/:otherHandoverId',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const { profile } = req as AuthedRequest;
+    const to = await loadHandover(String(req.params.handoverId));
+    const from = await loadHandover(String(req.params.otherHandoverId));
+    await loadMembership(profile.id, to.project_id);
+    if (from.project_id !== to.project_id) throw new HttpError(400, 'Those versions belong to different projects');
+
+    const fromClaims = flatten(from.snapshot?.sections ?? []);
+    const toClaims = flatten(to.snapshot?.sections ?? []);
+
+    // A refreshed extraction regenerates claim ids, so identity cannot be the
+    // comparison key: the same statement must count as unchanged even when it
+    // arrives with a new row. Statements are matched by normalised text first,
+    // then by strong subject overlap (reported as rewritten).
+    const key = (text: string) => normalise(text);
+    const fromByText = new Map([...fromClaims.values()].map((claim) => [key(claim.text), claim]));
+    const toByText = new Map([...toClaims.values()].map((claim) => [key(claim.text), claim]));
+
+    const addedClaims = [...toClaims.values()].filter((claim) => !fromByText.has(key(claim.text)));
+    const removedClaims = [...fromClaims.values()].filter((claim) => !toByText.has(key(claim.text)));
+
+    const changed: HandoverDiff['changed'] = [];
+    const rewritten = new Set<string>();
+    const rewrittenFrom = new Set<string>();
+    for (const claim of addedClaims) {
+      const candidate = removedClaims.find(
+        (before) =>
+          !rewrittenFrom.has(before.id) &&
+          before.category === claim.category &&
+          similarText(before.text, claim.text) >= 0.7,
+      );
+      if (!candidate) continue;
+      rewritten.add(claim.id);
+      rewrittenFrom.add(candidate.id);
+      changed.push({
+        id: claim.id,
+        category: claim.category,
+        from_text: candidate.text,
+        to_text: claim.text,
+        evidence: claim.evidence,
+      });
+    }
+
+    const added = addedClaims.filter((claim) => !rewritten.has(claim.id));
+    const removed = removedClaims.filter((claim) => !rewrittenFrom.has(claim.id));
+    const unchanged = [...toClaims.values()].filter((claim) => fromByText.has(key(claim.text))).length;
+
+    const diff: HandoverDiff = {
+      from: { id: from.id, version: from.version, approved_at: from.approved_at },
+      to: { id: to.id, version: to.version, approved_at: to.approved_at },
+      added: added.map((claim) => ({
+        id: claim.id,
+        category: claim.category,
+        text: claim.text,
+        evidence: claim.evidence,
+        source_kind: claim.source_kind,
+      })),
+      removed: removed.map((claim) => ({
+        id: claim.id,
+        category: claim.category,
+        text: claim.text,
+        evidence: claim.evidence,
+        source_kind: claim.source_kind,
+      })),
+      changed,
+      unchanged,
+    };
+    res.json({ diff });
+  }),
+);
+
+/** Restore an earlier approved version as a new approval on top of history. */
+router.post(
+  '/handovers/:handoverId/rollback',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const { profile } = req as AuthedRequest;
+    const source = await loadHandover(String(req.params.handoverId));
+    const membership = await loadMembership(profile.id, source.project_id);
+    if (membership.role !== 'manager') throw new HttpError(403, 'Only the project manager can restore a version');
+    if (!source.snapshot?.sections?.length) throw new HttpError(409, 'That version has no approved content');
+
+    const db = serviceClient();
+    const { data: latest } = await db
+      .from(Tables.handovers)
+      .select('version')
+      .eq('project_id', source.project_id)
+      .order('version', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    const version = ((latest?.version as number | undefined) ?? 0) + 1;
+
+    await db
+      .from(Tables.handovers)
+      .update({ status: 'superseded' })
+      .eq('project_id', source.project_id)
+      .eq('status', 'approved');
+
+    // Also retire any open draft so the restored version is the live one.
+    await db
+      .from(Tables.handovers)
+      .update({ status: 'rejected' })
+      .eq('project_id', source.project_id)
+      .eq('status', 'draft');
+
+    const { data: created, error } = await db
+      .from(Tables.handovers)
+      .insert({
+        project_id: source.project_id,
+        version,
+        status: 'approved',
+        note: `Restored from v${source.version}`,
+        snapshot: source.snapshot,
+        created_by: profile.id,
+        approved_by: profile.id,
+        approved_at: new Date().toISOString(),
+      })
+      .select('*')
+      .single();
+    if (error) throw new HttpError(500, error.message);
+
+    await audit(source.project_id, profile.id, 'handover.rolled_back', 'handover', created.id as string, {
+      restored_from: source.version,
+      version,
+    });
+    res.status(201).json({ handover: created });
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// Delivered handover: expiring signed links
+// ---------------------------------------------------------------------------
+
+interface DeliveryRow {
+  id: string;
+  handover_id: string;
+  project_id: string;
+  token: string;
+  scope: RecipientScope;
+  recipient_label: string | null;
+  expires_at: string;
+  revoked_at: string | null;
+  opened_at: string | null;
+  open_count: number;
+  created_at: string;
+}
+
+interface DeliveryAckRow {
+  link_id: string;
+  name: string;
+  email: string | null;
+  acknowledged_at: string;
+}
+
+function deliveryStatus(row: DeliveryRow, now: number): DeliveryStatus {
+  if (row.revoked_at) return 'revoked';
+  return new Date(row.expires_at).getTime() <= now ? 'expired' : 'active';
+}
+
+function toDeliveryLink(row: DeliveryRow, ack: DeliveryAckRow | undefined): DeliveryLink {
+  const now = Date.now();
+  const status = deliveryStatus(row, now);
+  return {
+    id: row.id,
+    handover_id: row.handover_id,
+    project_id: row.project_id,
+    scope: row.scope,
+    recipient_label: row.recipient_label,
+    expires_at: row.expires_at,
+    revoked_at: row.revoked_at,
+    opened_at: row.opened_at,
+    open_count: row.open_count,
+    created_at: row.created_at,
+    status,
+    url: status === 'active' ? `${config.webOrigin}/#/delivery/${row.token}` : null,
+    token: status === 'active' ? row.token : null,
+    acknowledgement: ack
+      ? { name: ack.name, email: ack.email, acknowledged_at: ack.acknowledged_at }
+      : null,
+    needs_reminder: status === 'active' && !ack,
+  };
+}
+
+const createDelivery = z.object({
+  scope: z.enum(RECIPIENT_SCOPES),
+  days: z.coerce.number().int().min(1).max(90).default(7),
+  recipient_label: z.string().max(120).optional(),
+});
+
+router.get(
+  '/handovers/:handoverId/deliveries',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const { profile } = req as AuthedRequest;
+    const handover = await loadHandover(String(req.params.handoverId));
+    const membership = await loadMembership(profile.id, handover.project_id);
+    if (!['manager', 'reviewer'].includes(membership.role)) {
+      throw new HttpError(403, 'Only a manager or reviewer can see delivery links');
+    }
+
+    const db = serviceClient();
+    const { data: links, error } = await db
+      .from(Tables.deliveryLinks)
+      .select('*')
+      .eq('handover_id', handover.id)
+      .order('created_at', { ascending: false });
+    if (error) throw new HttpError(500, error.message);
+
+    const ids = (links ?? []).map((row) => row.id as string);
+    const { data: acks } = ids.length
+      ? await db.from(Tables.deliveryAcknowledgements).select('*').in('link_id', ids)
+      : { data: [] as DeliveryAckRow[] };
+    const ackByLink = new Map((acks ?? []).map((ack) => [ack.link_id as string, ack as DeliveryAckRow]));
+
+    const out = ((links ?? []) as DeliveryRow[]).map((row) => toDeliveryLink(row, ackByLink.get(row.id)));
+    res.json({ deliveries: out });
+  }),
+);
+
+router.post(
+  '/handovers/:handoverId/deliveries',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const { profile } = req as AuthedRequest;
+    const handover = await loadHandover(String(req.params.handoverId));
+    const membership = await loadMembership(profile.id, handover.project_id);
+    if (!['manager', 'reviewer'].includes(membership.role)) {
+      throw new HttpError(403, 'Only a manager or reviewer can create a delivery link');
+    }
+    if (handover.status !== 'approved') throw new HttpError(409, 'Approve the handover before delivering it');
+
+    const body = createDelivery.safeParse(req.body ?? {});
+    if (!body.success) throw new HttpError(400, 'Choose a scope and an expiry between 1 and 90 days');
+
+    const token = randomBytes(24).toString('base64url');
+    const expiresAt = new Date(Date.now() + body.data.days * 24 * 60 * 60 * 1000).toISOString();
+    const { data: created, error } = await serviceClient()
+      .from(Tables.deliveryLinks)
+      .insert({
+        handover_id: handover.id,
+        project_id: handover.project_id,
+        token,
+        scope: body.data.scope,
+        recipient_label: body.data.recipient_label ?? null,
+        expires_at: expiresAt,
+        created_by: profile.id,
+      })
+      .select('*')
+      .single();
+    if (error) throw new HttpError(500, error.message);
+
+    await audit(handover.project_id, profile.id, 'delivery.link_created', 'delivery_link', created.id as string, {
+      scope: body.data.scope,
+      days: body.data.days,
+      expires_at: expiresAt,
+    });
+    res.status(201).json({ delivery: toDeliveryLink(created as DeliveryRow, undefined) });
+  }),
+);
+
+router.post(
+  '/deliveries/:linkId/revoke',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const { profile } = req as AuthedRequest;
+    const db = serviceClient();
+    const { data: row } = await db
+      .from(Tables.deliveryLinks)
+      .select('*')
+      .eq('id', req.params.linkId)
+      .maybeSingle();
+    if (!row) throw new HttpError(404, 'Delivery link not found');
+    const membership = await loadMembership(profile.id, row.project_id as string);
+    if (membership.role !== 'manager') throw new HttpError(403, 'Only the project manager can revoke a link');
+
+    const { data: updated, error } = await db
+      .from(Tables.deliveryLinks)
+      .update({ revoked_at: new Date().toISOString() })
+      .eq('id', row.id)
+      .select('*')
+      .single();
+    if (error) throw new HttpError(500, error.message);
+
+    await audit(row.project_id as string, profile.id, 'delivery.link_revoked', 'delivery_link', row.id as string, null);
+    res.json({ delivery: toDeliveryLink(updated as DeliveryRow, undefined) });
+  }),
+);
+
+router.post(
+  '/deliveries/:linkId/remind',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const { profile } = req as AuthedRequest;
+    const db = serviceClient();
+    const { data: row } = await db
+      .from(Tables.deliveryLinks)
+      .select('*')
+      .eq('id', req.params.linkId)
+      .maybeSingle();
+    if (!row) throw new HttpError(404, 'Delivery link not found');
+    const membership = await loadMembership(profile.id, row.project_id as string);
+    if (!['manager', 'reviewer'].includes(membership.role)) {
+      throw new HttpError(403, 'Only a manager or reviewer can send a reminder');
+    }
+
+    const link = row as DeliveryRow;
+    if (deliveryStatus(link, Date.now()) !== 'active') {
+      throw new HttpError(409, 'That link is no longer active');
+    }
+    const { data: ack } = await db
+      .from(Tables.deliveryAcknowledgements)
+      .select('*')
+      .eq('link_id', link.id)
+      .maybeSingle();
+    if (ack) throw new HttpError(409, 'That recipient has already acknowledged the handover');
+
+    await audit(link.project_id, profile.id, 'delivery.reminder', 'delivery_link', link.id, {
+      recipient: link.recipient_label,
+    });
+    res.json({ delivery: toDeliveryLink(link, undefined) });
   }),
 );
 

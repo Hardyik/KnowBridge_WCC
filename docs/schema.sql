@@ -1,9 +1,12 @@
--- KnowBridge — Round 2 schema (documents-only build)
+-- KnowBridge — Round 3 schema (documents + repository connector)
 -- Run this in Supabase → SQL Editor → New query → Run.
 -- It recreates the KnowBridge tables; any previous KnowBridge tables are dropped.
 
 create extension if not exists pgcrypto;
 
+drop table if exists public.assistant_messages cascade;
+drop table if exists public.delivery_acknowledgements cascade;
+drop table if exists public.delivery_links cascade;
 drop table if exists public.acknowledgements cascade;
 drop table if exists public.handovers cascade;
 drop table if exists public.audit_log cascade;
@@ -57,6 +60,13 @@ create table public.sources (
   byte_size integer not null default 0,
   status text not null default 'ready' check (status in ('ready', 'failed')),
   error text,
+  -- provenance: an uploaded file or a read-only repository connection
+  kind text not null default 'document' check (kind in ('document', 'github')),
+  external_ref text,
+  -- confidentiality tier, enforced by the API's scoping layer
+  confidentiality text not null default 'internal'
+    check (confidentiality in ('public', 'internal', 'restricted')),
+  last_synced_at timestamptz,
   uploaded_by uuid references auth.users (id) on delete set null,
   created_at timestamptz not null default now()
 );
@@ -67,6 +77,8 @@ create table public.source_chunks (
   ordinal integer not null,
   heading text not null default 'Document start',
   text text not null,
+  -- date the source itself states (commit or issue date), used by the timeline
+  occurred_at timestamptz,
   unique (source_id, ordinal)
 );
 
@@ -97,6 +109,10 @@ create table public.claims (
     check (review_state in ('pending', 'verified', 'excluded', 'redacted')),
   reviewed_by uuid references auth.users (id) on delete set null,
   reviewed_at timestamptz,
+  occurred_at timestamptz,
+  -- stable identity of the statement, so a re-extraction can carry a reviewer
+  -- decision onto the regenerated claim instead of resetting it
+  fingerprint text,
   created_at timestamptz not null default now()
 );
 
@@ -127,6 +143,49 @@ create table public.acknowledgements (
   unique (handover_id, user_id)
 );
 
+-- ---------------------------------------------------------------------------
+-- Delivered handover: expiring signed links and their acknowledgements
+-- ---------------------------------------------------------------------------
+
+create table public.delivery_links (
+  id uuid primary key default gen_random_uuid(),
+  handover_id uuid not null references public.handovers (id) on delete cascade,
+  project_id uuid not null references public.projects (id) on delete cascade,
+  token text not null unique,
+  scope text not null
+    check (scope in ('engineer', 'manager', 'coordinator', 'general')),
+  recipient_label text,
+  created_by uuid references auth.users (id) on delete set null,
+  expires_at timestamptz not null,
+  revoked_at timestamptz,
+  opened_at timestamptz,
+  open_count integer not null default 0,
+  created_at timestamptz not null default now()
+);
+
+create table public.delivery_acknowledgements (
+  id uuid primary key default gen_random_uuid(),
+  link_id uuid not null references public.delivery_links (id) on delete cascade,
+  name text not null,
+  email text,
+  acknowledged_at timestamptz not null default now(),
+  unique (link_id)
+);
+
+-- ---------------------------------------------------------------------------
+-- AI assistant conversation, kept per person and per project
+-- ---------------------------------------------------------------------------
+
+create table public.assistant_messages (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references public.projects (id) on delete cascade,
+  user_id uuid not null references auth.users (id) on delete cascade,
+  role text not null check (role in ('user', 'assistant')),
+  content text not null,
+  citations jsonb,
+  created_at timestamptz not null default now()
+);
+
 create table public.audit_log (
   id uuid primary key default gen_random_uuid(),
   project_id uuid not null references public.projects (id) on delete cascade,
@@ -143,12 +202,19 @@ create table public.audit_log (
 -- ---------------------------------------------------------------------------
 
 create index claims_project_idx on public.claims (project_id, category);
+create index claims_fingerprint_idx on public.claims (project_id, fingerprint);
+create index claims_occurred_idx on public.claims (project_id, occurred_at desc);
 create index claims_chunk_idx on public.claims (chunk_id);
 create index sources_project_idx on public.sources (project_id);
 create index chunks_source_idx on public.source_chunks (source_id, ordinal);
 create index members_user_idx on public.project_members (user_id);
+create index delivery_links_handover_idx on public.delivery_links (handover_id);
+create index delivery_links_token_idx on public.delivery_links (token);
+create index assistant_messages_thread_idx
+  on public.assistant_messages (project_id, user_id, created_at);
 create index handovers_project_idx on public.handovers (project_id, version desc);
 create index audit_project_idx on public.audit_log (project_id, created_at desc);
+create index sources_external_idx on public.sources (project_id, external_ref);
 
 -- ---------------------------------------------------------------------------
 -- Access control
@@ -168,6 +234,9 @@ alter table public.claims enable row level security;
 alter table public.handovers enable row level security;
 alter table public.acknowledgements enable row level security;
 alter table public.audit_log enable row level security;
+alter table public.delivery_links enable row level security;
+alter table public.delivery_acknowledgements enable row level security;
+alter table public.assistant_messages enable row level security;
 
 -- Profiles are created by the API, but this trigger keeps direct Supabase
 -- sign-ups from leaving an account without a profile row.

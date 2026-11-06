@@ -1,6 +1,14 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { Claim, ClaimCategory, ClaimStatus, REVIEW_STATES, ReviewState } from '@knowbridge/shared';
+import {
+  Claim,
+  ClaimCategory,
+  ClaimStatus,
+  Confidentiality,
+  REVIEW_STATES,
+  ReviewState,
+  SourceKind,
+} from '@knowbridge/shared';
 import {
   asyncHandler,
   audit,
@@ -11,6 +19,7 @@ import {
   requireMember,
 } from '../auth.js';
 import { serviceClient, Tables } from '../db.js';
+import { attachCorroborations } from '../services/corroboration.js';
 
 const router = Router();
 
@@ -32,8 +41,13 @@ interface ClaimRow {
   chunk_id: string;
   location: string;
   quote: string | null;
+  occurred_at: string | null;
+  confidentiality: Confidentiality | null;
   created_at: string;
-  sources?: { title: string } | { title: string }[] | null;
+  sources?:
+    | { title: string; kind?: SourceKind; confidentiality?: Confidentiality }
+    | { title: string; kind?: SourceKind; confidentiality?: Confidentiality }[]
+    | null;
 }
 
 const patchClaim = z.object({
@@ -48,7 +62,7 @@ router.get(
     const { projectId } = req as MemberRequest;
     const { data, error } = await serviceClient()
       .from(Tables.claims)
-      .select('*, sources(title)')
+      .select('*, sources(title, kind, confidentiality)')
       .eq('project_id', projectId)
       .order('created_at', { ascending: true });
     if (error) throw new HttpError(500, error.message);
@@ -77,11 +91,15 @@ router.get(
           location: row.location,
           quote: row.quote,
         },
+        source_kind: (embedded?.kind as SourceKind) ?? 'document',
+        confidentiality: embedded?.confidentiality ?? 'internal',
+        occurred_at: row.occurred_at,
+        corroborations: [],
         created_at: row.created_at,
       };
     });
 
-    res.json({ claims });
+    res.json({ claims: attachCorroborations(claims) });
   }),
 );
 

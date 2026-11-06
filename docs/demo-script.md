@@ -82,3 +82,53 @@ acknowledgement.
 - The tool shows contradictions and missing owners instead of inventing an answer.
 - Approval freezes a version; later edits do not silently change what was shared.
 - The scope is decided by the server from the member record, not by the browser.
+
+---
+
+# Round 3 additions (optional, five minutes)
+
+These extend the same Ledgerline project. Do them after §8 if time allows; each one is a single
+tab.
+
+## R1. Repository connector and timeline
+
+1. **Sources** → *Connect a GitHub repository* → `Hardyik/KnowBridge_WCC` → **Connect repository**.
+   Two sources appear with the `github` badge: the README and the recent commits.
+2. **Run AI extraction** once (Groq's token-per-minute limit may need a second press — it resumes).
+3. **Timeline**: claims from commits are grouped by month with the commit date and message as
+   evidence; document claims sit under **Undated** instead of being given an invented date.
+4. Where a commit and a document state the same fact, the claim shows **also stated in …** — here
+   the README describes the retry-queue contradiction the runbook also records.
+
+## R2. Refresh that keeps review decisions, then diff and restore
+
+1. **Claims**: verify or redact one claim, for example the sandbox-key line.
+2. **↻ Refresh all**: the summary reports how many reviewer decisions were carried over. The claim
+   you verified is still verified, with the same id.
+3. **Handover → Handover versions**: press **Compare** on an older approved version. The panel
+   shows added, removed, rewritten and unchanged statements — matched by text, so a refresh that
+   regenerates ids does not look like wholesale change.
+4. Press **Restore** on an older version: it becomes a new approved version and the previous one is
+   marked superseded. Nothing is deleted.
+
+## R3. Confidentiality tier and an expiring delivery link
+
+1. **Sources**: change a source's confidentiality to `restricted`. Immediately, that source's
+   claims disappear from every recipient view and delivery link, even one approved earlier.
+2. **Handover → Deliver this handover**: choose a scope (`general` is the most striking), an
+   expiry of 1–3 days, and create the link. **Copy** it.
+3. Open the link in a private window — no account needed. The page shows only overview, pending
+   work and next actions, the reviewer note, and an acknowledgement form.
+4. Acknowledge as a name; back in the manager's Handover tab the link shows the acknowledgement
+   time. **Remind** is available for links that are still unacknowledged, and **Revoke** kills a
+   link immediately.
+
+## R4. AI assistant
+
+**AI Assistant** tab (or the recipient's own session): ask *What is still pending, and who owns
+it?* The answer is built only from the scoped handover and lists the claims it used with their
+source and quote. Ask something the documents never mention — for example *Who won the 2010 World
+Cup?* — and it says the handover does not record it, rather than answering.
+
+Say out loud: the assistant is a reader of the same evidence base, not a second source of truth;
+its context is filtered by scope and confidentiality before the model sees it.

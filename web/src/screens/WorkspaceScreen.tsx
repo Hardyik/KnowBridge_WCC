@@ -2,6 +2,9 @@ import { ChangeEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import {
   AuditEntry,
   Claim,
+  CONFIDENTIALITY_DESCRIPTIONS,
+  CONFIDENTIALITY_TIERS,
+  Confidentiality,
   ExtractionSummary,
   HandoverVersion,
   MemberRole,
@@ -20,8 +23,10 @@ import {
 import { api, ApiError } from '../api';
 import ClaimCard from '../components/ClaimCard';
 import HandoverPanel from './HandoverPanel';
+import TimelinePanel from './TimelinePanel';
+import AssistantPanel from './AssistantPanel';
 
-type Tab = 'sources' | 'map' | 'claims' | 'handover' | 'members' | 'audit';
+type Tab = 'sources' | 'timeline' | 'map' | 'claims' | 'handover' | 'assistant' | 'members' | 'audit';
 
 interface Detail {
   project: { id: string; name: string; description: string; created_at: string };
@@ -48,6 +53,10 @@ export default function WorkspaceScreen({ projectId }: { projectId: string }) {
   const [uploadErrors, setUploadErrors] = useState<{ filename: string; error: string }[]>([]);
   const [statusFilter, setStatusFilter] = useState('all');
   const [categoryFilter, setCategoryFilter] = useState('all');
+  const [uploadTier, setUploadTier] = useState<Confidentiality>('internal');
+  const [repoInput, setRepoInput] = useState('');
+  const [repoNotes, setRepoNotes] = useState<string[]>([]);
+  const [repoBusy, setRepoBusy] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -116,6 +125,7 @@ export default function WorkspaceScreen({ projectId }: { projectId: string }) {
     if (!files?.length) return;
     const form = new FormData();
     for (const file of Array.from(files)) form.append('files', file);
+    form.append('confidentiality', uploadTier);
 
     setBusy(true);
     setError(null);
@@ -137,13 +147,57 @@ export default function WorkspaceScreen({ projectId }: { projectId: string }) {
     }
   }
 
-  async function extract() {
+  async function connectRepo() {
+    if (repoInput.trim().length < 3) return;
+    setRepoBusy(true);
+    setError(null);
+    setMessage(null);
+    setRepoNotes([]);
+    try {
+      const data = await api<{
+        repo: string;
+        sources: ProjectSource[];
+        notes: string[];
+        replaced: number;
+      }>(`/projects/${projectId}/sources/github`, {
+        method: 'POST',
+        body: JSON.stringify({ repo: repoInput.trim(), confidentiality: uploadTier }),
+      });
+      setMessage(
+        `${data.sources.length} source(s) connected from ${data.repo}${
+          data.replaced ? `, replacing ${data.replaced} older one(s)` : ''
+        }. Run extraction to merge them with your documents.`,
+      );
+      setRepoNotes(data.notes);
+      setRepoInput('');
+      await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : String(err));
+    } finally {
+      setRepoBusy(false);
+    }
+  }
+
+  async function setSourceTier(sourceId: string, tier: Confidentiality) {
+    try {
+      await api(`/projects/${projectId}/sources/${sourceId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ confidentiality: tier }),
+      });
+      await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : String(err));
+    }
+  }
+
+  async function extract(refresh = false) {
     setBusy(true);
     setError(null);
     setMessage(null);
     try {
       const data = await api<{ summary: ExtractionSummary }>(`/projects/${projectId}/extract`, {
         method: 'POST',
+        body: JSON.stringify({ refresh }),
       });
       setSummary(data.summary);
       await load();
@@ -200,9 +254,19 @@ export default function WorkspaceScreen({ projectId }: { projectId: string }) {
           </div>
         </div>
         {canReview && (
-          <button className="primary" disabled={busy || !sources.length} onClick={() => void extract()}>
-            {busy ? 'Working…' : '▶ Run AI extraction'}
-          </button>
+          <div className="pill-row">
+            <button className="primary" disabled={busy || !sources.length} onClick={() => void extract() }>
+              {busy ? 'Working…' : '▶ Run AI extraction'}
+            </button>
+            <button
+              className="ghost"
+              disabled={busy || !sources.length}
+              title="Regenerate every passage, keeping each reviewer decision"
+              onClick={() => void extract(true)}
+            >
+              ↻ Refresh all
+            </button>
+          </div>
         )}
       </div>
 
@@ -210,10 +274,17 @@ export default function WorkspaceScreen({ projectId }: { projectId: string }) {
       {message && <div className="notice ok" style={{ marginBottom: 14 }}>{message}</div>}
       {summary && (
         <div className="notice" style={{ marginBottom: 14 }}>
-          Extraction finished — {summary.claims_created} claims from {summary.chunks} passages ·{' '}
-          {summary.conflicts} conflict(s) · {summary.needs_review} need review · {summary.unsupported} without a
-          verbatim quote · {summary.duplicates_skipped} duplicate(s) skipped · {summary.owner_gaps} ownership
-          gap(s).
+          {summary.refreshed ? 'Refresh finished' : 'Extraction finished'} — {summary.claims_created} new claim(s)
+          from {summary.chunks} passages · {summary.conflicts} conflict(s) · {summary.needs_review} need review ·{' '}
+          {summary.unsupported} without a verbatim quote · {summary.duplicates_skipped} duplicate(s) skipped ·{' '}
+          {summary.owner_gaps} ownership gap(s).
+          {summary.refreshed && (
+            <span className="muted">
+              {' '}
+              Reviewer decisions carried over: {summary.reviews_preserved}
+              {summary.reviews_reset > 0 ? ` · ${summary.reviews_reset} could not be matched and need another look` : ''}.
+            </span>
+          )}
           {summary.sources_failed.length > 0 && (
             <span className="muted"> Failed: {summary.sources_failed.join('; ')}</span>
           )}
@@ -233,9 +304,11 @@ export default function WorkspaceScreen({ projectId }: { projectId: string }) {
         {(
           [
             ['sources', `Sources (${sources.length})`],
+            ['timeline', 'Timeline'],
             ['map', 'Map'],
             ['claims', `Claims (${claims.length})`],
             ['handover', 'Handover'],
+            ['assistant', 'AI Assistant'],
             ['members', `Members (${detail.members.length})`],
             ['audit', 'Audit'],
           ] as [Tab, string][]
@@ -249,17 +322,76 @@ export default function WorkspaceScreen({ projectId }: { projectId: string }) {
       {tab === 'sources' && (
         <div className="stack" style={{ gap: 18 }}>
           {canReview ? (
-            <section className="card pad-lg stack">
-              <h3>Connect authorised documents</h3>
-              <p className="muted small">
-                PDF, DOCX, TXT or MD, up to 10 files at a time (15 MB each). Documents are chunked and
-                every extracted claim must quote a passage from its chunk.
-              </p>
-              <label className="dropzone" style={{ cursor: 'pointer' }}>
-                <input type="file" multiple accept=".pdf,.docx,.txt,.md,.markdown" hidden onChange={upload} disabled={busy} />
-                {busy ? 'Processing…' : 'Click to choose documents'}
-              </label>
-            </section>
+            <>
+              <div className="grid cols-2">
+                <section className="card pad-lg stack">
+                  <h3>Connect authorised documents</h3>
+                  <p className="muted small">
+                    PDF, DOCX, TXT or MD, up to 10 files at a time (15 MB each). Documents are chunked and
+                    every extracted claim must quote a passage from its chunk.
+                  </p>
+                  <div>
+                    <label htmlFor="upload-tier">Confidentiality of these files</label>
+                    <select
+                      id="upload-tier"
+                      value={uploadTier}
+                      onChange={(e) => setUploadTier(e.target.value as Confidentiality)}
+                    >
+                      {CONFIDENTIALITY_TIERS.map((tier) => (
+                        <option key={tier} value={tier}>
+                          {tier}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="muted tiny" style={{ marginTop: 4 }}>
+                      {CONFIDENTIALITY_DESCRIPTIONS[uploadTier]}
+                    </p>
+                  </div>
+                  <label className="dropzone" style={{ cursor: 'pointer' }}>
+                    <input
+                      type="file"
+                      multiple
+                      accept=".pdf,.docx,.txt,.md,.markdown"
+                      hidden
+                      onChange={upload}
+                      disabled={busy}
+                    />
+                    {busy ? 'Processing…' : 'Click to choose documents'}
+                  </label>
+                </section>
+
+                <section className="card pad-lg stack">
+                  <h3>Connect a GitHub repository</h3>
+                  <p className="muted small">
+                    Read-only. README, open and closed issues, and recent commits become a second source type,
+                    with each claim quoting the issue or commit it came from.
+                  </p>
+                  <div>
+                    <label htmlFor="repo-input">Repository</label>
+                    <input
+                      id="repo-input"
+                      value={repoInput}
+                      onChange={(e) => setRepoInput(e.target.value)}
+                      placeholder="owner/name or https://github.com/owner/name"
+                      disabled={repoBusy}
+                    />
+                  </div>
+                  <div className="row">
+                    <button
+                      className="primary"
+                      disabled={repoBusy || repoInput.trim().length < 3}
+                      onClick={() => void connectRepo()}
+                    >
+                      {repoBusy ? 'Reading repository…' : 'Connect repository'}
+                    </button>
+                    <span className="muted tiny">Uses the confidentiality tier selected on the left.</span>
+                  </div>
+                  {repoNotes.length > 0 && (
+                    <div className="notice">{repoNotes.join(' · ')}</div>
+                  )}
+                </section>
+              </div>
+            </>
           ) : (
             <div className="notice">Only a manager or reviewer can add sources.</div>
           )}
@@ -273,6 +405,8 @@ export default function WorkspaceScreen({ projectId }: { projectId: string }) {
                 <thead>
                   <tr>
                     <th>Document</th>
+                    <th>Type</th>
+                    <th>Confidentiality</th>
                     <th>Status</th>
                     <th>Passages</th>
                     <th>Added</th>
@@ -284,7 +418,30 @@ export default function WorkspaceScreen({ projectId }: { projectId: string }) {
                     <tr key={source.id}>
                       <td>
                         <strong>{source.title}</strong>
-                        <div className="muted tiny mono">{source.filename}</div>
+                        <div className="muted tiny mono">{source.external_ref ?? source.filename}</div>
+                      </td>
+                      <td>
+                        <span className={`badge ${source.kind === 'github' ? 'supported' : 'cat'}`}>
+                          {source.kind}
+                        </span>
+                      </td>
+                      <td>
+                        {canApprove ? (
+                          <select
+                            value={source.confidentiality}
+                            disabled={busy}
+                            style={{ width: 130 }}
+                            onChange={(e) => void setSourceTier(source.id, e.target.value as Confidentiality)}
+                          >
+                            {CONFIDENTIALITY_TIERS.map((tier) => (
+                              <option key={tier} value={tier}>
+                                {tier}
+                              </option>
+                            ))}
+                          </select>
+                        ) : (
+                          <span className="badge">{source.confidentiality}</span>
+                        )}
                       </td>
                       <td>
                         <span className={`badge ${source.status === 'ready' ? 'supported' : 'excluded'}`}>
@@ -309,6 +466,8 @@ export default function WorkspaceScreen({ projectId }: { projectId: string }) {
           </section>
         </div>
       )}
+
+      {tab === 'timeline' && <TimelinePanel claims={claims} />}
 
       {tab === 'map' && (
         <div className="stack" style={{ gap: 20 }}>
@@ -431,9 +590,12 @@ export default function WorkspaceScreen({ projectId }: { projectId: string }) {
           claims={claims}
           handovers={handovers}
           canApprove={Boolean(canApprove)}
+          canReview={canReview}
           onChanged={() => void load()}
         />
       )}
+
+      {tab === 'assistant' && <AssistantPanel projectId={projectId} />}
 
       {tab === 'members' && (
         <MembersTab

@@ -49,6 +49,12 @@ export default function ClaimCard({ claim, canReview, onChange }: Props) {
           <span className={`badge ${claim.status}`}>{claim.status.replace('_', ' ')}</span>
           {stateBadge}
           {claim.conflict_group && <span className="badge conflicting">conflict</span>}
+          {claim.source_kind === 'github' && <span className="badge supported">github</span>}
+          {claim.confidentiality !== 'internal' && (
+            <span className={`badge ${claim.confidentiality === 'restricted' ? 'excluded' : 'cat'}`}>
+              {claim.confidentiality}
+            </span>
+          )}
         </div>
         {canReview && (
           <div className="pill-row">
@@ -108,9 +114,15 @@ export default function ClaimCard({ claim, canReview, onChange }: Props) {
         <span className="tiny">
           {claim.evidence.source_title}
           {claim.evidence.location ? ` · ${claim.evidence.location}` : ''}
+          {claim.occurred_at ? ` · ${new Date(claim.occurred_at).toLocaleDateString()}` : ''}
           {claim.evidence.quote ? '' : ' · no verbatim quote available'}
         </span>
         {claim.evidence.quote && <span className="quote-block">“{claim.evidence.quote}”</span>}
+        {claim.corroborations.length > 0 && (
+          <span className="corroboration">
+            Also stated in {claim.corroborations.map((match) => match.source_title).join(', ')}
+          </span>
+        )}
       </div>
 
       {error && <div className="notice bad tiny">{error}</div>}

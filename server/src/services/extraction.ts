@@ -4,11 +4,13 @@ import {
   ClaimStatus,
   ExtractionSummary,
   OWNER_UNCONFIRMED,
+  ReviewState,
 } from '@knowbridge/shared';
 import { HttpError } from '../auth.js';
 import { serviceClient, Tables } from '../db.js';
 import { completeJson } from './llm.js';
 import { normalise } from './documents.js';
+import { fingerprint, overlap, subjectTokens } from './similarity.js';
 
 interface ChunkRow {
   id: string;
@@ -16,6 +18,7 @@ interface ChunkRow {
   ordinal: number;
   heading: string;
   text: string;
+  occurred_at: string | null;
 }
 
 interface DraftClaim {
@@ -32,6 +35,29 @@ interface StoredClaim {
   source_id: string;
   chunk_id: string;
   status: ClaimStatus;
+  review_state: ReviewState;
+  fingerprint: string | null;
+}
+
+interface ReviewerDecision {
+  claim_id: string;
+  chunk_id: string;
+  text: string;
+  original_text: string;
+  fingerprint: string | null;
+  review_state: ReviewState;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  used: boolean;
+}
+
+export interface ExtractionOptions {
+  /**
+   * Regenerate claims for passages that already produced them. Unreviewed
+   * claims for those passages are replaced; reviewer decisions are carried
+   * over to the new claims by fingerprint, then by subject overlap.
+   */
+  refresh?: boolean;
 }
 
 const SYSTEM_PROMPT = `You are the extraction engine of KnowBridge, a knowledge-handover tool for software teams.
@@ -145,29 +171,6 @@ const OPPOSING_POLES: [RegExp, RegExp][] = [
   [/\bnot deployed\b|\bnot released\b|\bnot shipped\b/, /\bdeployed\b|\breleased\b|\bshipped\b/],
 ];
 
-const STOPWORDS = new Set([
-  'the', 'and', 'for', 'that', 'this', 'with', 'from', 'into', 'have', 'has', 'was', 'were',
-  'are', 'not', 'but', 'its', 'their', 'they', 'will', 'been', 'being', 'which', 'when',
-  'than', 'then', 'also', 'only', 'still', 'yet', 'all', 'any', 'can', 'may', 'must', 'has',
-  'had', 'our', 'your', 'over', 'under', 'after', 'before', 'used', 'using', 'via',
-]);
-
-function subjectTokens(text: string): Set<string> {
-  return new Set(
-    normalise(text)
-      .replace(/[^a-z0-9\s]/g, ' ')
-      .split(/\s+/)
-      .filter((w) => w.length > 3 && !STOPWORDS.has(w)),
-  );
-}
-
-function overlap(a: Set<string>, b: Set<string>): number {
-  if (!a.size || !b.size) return 0;
-  let shared = 0;
-  for (const token of a) if (b.has(token)) shared += 1;
-  return shared / Math.min(a.size, b.size);
-}
-
 export interface ConflictGroup {
   groupId: string;
   claimIds: string[];
@@ -214,12 +217,16 @@ export function detectConflicts(claims: StoredClaim[]): ConflictGroup[] {
 // Pipeline
 // ---------------------------------------------------------------------------
 
-export async function runExtraction(projectId: string): Promise<ExtractionSummary> {
+export async function runExtraction(
+  projectId: string,
+  options: ExtractionOptions = {},
+): Promise<ExtractionSummary> {
+  const refresh = Boolean(options.refresh);
   const db = serviceClient();
 
   const { data: sources, error: sourceError } = await db
     .from(Tables.sources)
-    .select('id, title, status')
+    .select('id, title, status, confidentiality')
     .eq('project_id', projectId);
   if (sourceError) throw new HttpError(500, sourceError.message);
 
@@ -228,9 +235,10 @@ export async function runExtraction(projectId: string): Promise<ExtractionSummar
   if (!ready.length) throw new HttpError(400, 'Upload at least one readable document first');
 
   const sourceTitle = new Map(ready.map((s) => [s.id as string, s.title as string]));
+
   const { data: chunks, error: chunkError } = await db
     .from(Tables.sourceChunks)
-    .select('id, source_id, ordinal, heading, text')
+    .select('id, source_id, ordinal, heading, text, occurred_at')
     .in('source_id', ready.map((s) => s.id))
     .order('source_id', { ascending: true })
     .order('ordinal', { ascending: true });
@@ -240,22 +248,67 @@ export async function runExtraction(projectId: string): Promise<ExtractionSummar
 
   const { data: existing } = await db
     .from(Tables.claims)
-    .select('text, chunk_id')
+    .select('id, text, original_text, chunk_id, review_state, reviewed_by, reviewed_at, fingerprint')
     .eq('project_id', projectId);
-  const existingRows = (existing ?? []) as { text: string; chunk_id: string }[];
-  const seen = new Set(existingRows.map((c) => normalise(c.text)));
 
-  // Incremental extraction: passages that already produced claims are skipped,
-  // so a rate-limited run can simply be repeated to finish the job.
+  interface ExistingRow {
+    id: string;
+    text: string;
+    original_text: string;
+    chunk_id: string;
+    review_state: ReviewState;
+    reviewed_by: string | null;
+    reviewed_at: string | null;
+    fingerprint: string | null;
+  }
+  const existingRows = (existing ?? []) as ExistingRow[];
+
+  const seen = new Set(existingRows.map((c) => normalise(c.text)));
+  const decisions: ReviewerDecision[] = existingRows
+    .filter((c) => c.review_state !== 'pending' || c.text !== c.original_text)
+    .map((c) => ({
+      claim_id: c.id,
+      chunk_id: c.chunk_id,
+      text: c.text,
+      original_text: c.original_text,
+      fingerprint: c.fingerprint,
+      review_state: c.review_state,
+      reviewed_by: c.reviewed_by,
+      reviewed_at: c.reviewed_at,
+      used: false,
+    }));
+
+  // Refresh replaces unreviewed claims for every passage. Reviewed claims are
+  // never deleted, so the human judgement stays authoritative.
+  if (refresh) {
+    const unreviewed = existingRows
+      .filter((c) => c.review_state === 'pending' && c.text === c.original_text)
+      .map((c) => c.id);
+    for (let index = 0; index < unreviewed.length; index += 100) {
+      const batch = unreviewed.slice(index, index + 100);
+      const { error } = await db.from(Tables.claims).delete().in('id', batch);
+      if (error) throw new HttpError(500, error.message);
+    }
+    // Reviewed claims survive the refresh, so their statements must still count
+    // as already present or the model would recreate them alongside themselves.
+    const removed = new Set(unreviewed);
+    seen.clear();
+    for (const row of existingRows) {
+      if (!removed.has(row.id)) seen.add(normalise(row.text));
+    }
+  }
+
   const doneChunks = new Set(existingRows.map((c) => c.chunk_id));
-  const pendingChunks = chunkRows.filter((chunk) => !doneChunks.has(chunk.id));
+  const pendingChunks = refresh ? chunkRows : chunkRows.filter((chunk) => !doneChunks.has(chunk.id));
 
   let created = 0;
   let duplicates = 0;
   let unsupported = 0;
   let needsReview = 0;
   let ownerGaps = 0;
+  let reviewsPreserved = 0;
   const failures: string[] = [];
+  const createdClaims: { id: string; chunk_id: string; text: string; fingerprint: string }[] = [];
 
   await runsWithConcurrency(pendingChunks, 2, async (chunk) => {
     const title = sourceTitle.get(chunk.source_id) ?? 'Document';
@@ -269,9 +322,7 @@ export async function runExtraction(projectId: string): Promise<ExtractionSummar
     if (!drafts.length) return;
 
     // Ownership gaps are only meaningful when this chunk names nobody at all.
-    const ownerNames = drafts
-      .map((d) => d.owner_text)
-      .filter((n): n is string => Boolean(n));
+    const ownerNames = drafts.map((d) => d.owner_text).filter((n): n is string => Boolean(n));
 
     const rows = [];
     const batchSeen = new Set<string>();
@@ -279,6 +330,15 @@ export async function runExtraction(projectId: string): Promise<ExtractionSummar
       const key = normalise(draft.text);
       if (seen.has(key) || batchSeen.has(key)) {
         duplicates += 1;
+        // A statement that already exists is not replaced: if a reviewer
+        // decided on it, that decision stands.
+        const match = decisions.find(
+          (decision) => !decision.used && normalise(decision.text) === key,
+        );
+        if (match) {
+          match.used = true;
+          reviewsPreserved += 1;
+        }
         continue;
       }
       batchSeen.add(key);
@@ -307,6 +367,8 @@ export async function runExtraction(projectId: string): Promise<ExtractionSummar
         owner_text: ownerText,
         status,
         confidence: status === 'supported' ? 0.9 : status === 'needs_review' ? 0.45 : 0.2,
+        fingerprint: fingerprint(draft.text),
+        occurred_at: chunk.occurred_at ?? null,
       });
       seen.add(key);
     }
@@ -315,27 +377,81 @@ export async function runExtraction(projectId: string): Promise<ExtractionSummar
     const { data: inserted, error: insertError } = await db
       .from(Tables.claims)
       .insert(rows)
-      .select('id, text');
+      .select('id, text, chunk_id, fingerprint');
     if (insertError) {
       failures.push(`${title} / ${chunk.heading}: ${insertError.message}`);
       return;
     }
     created += inserted?.length ?? 0;
+    for (const row of inserted ?? []) {
+      createdClaims.push({
+        id: row.id as string,
+        chunk_id: row.chunk_id as string,
+        text: row.text as string,
+        fingerprint: row.fingerprint as string,
+      });
+    }
   });
+
+  // Carry reviewer decisions onto the claims that replaced them: exact
+  // fingerprint first, then same passage with strong subject overlap.
+  if (refresh) {
+    for (const decision of decisions) {
+      if (decision.used) continue;
+      const exact = createdClaims.find(
+        (claim) => claim.chunk_id === decision.chunk_id && claim.fingerprint === decision.fingerprint,
+      );
+      const near =
+        exact ??
+        createdClaims.find(
+          (claim) =>
+            claim.chunk_id === decision.chunk_id && overlap(subjectTokens(claim.text), subjectTokens(decision.text)) >= 0.7,
+        );
+      // No new claim carries this decision: it is reported as reset, not
+      // silently dropped.
+      if (!near) continue;
+      const update: Record<string, unknown> = {
+        review_state: decision.review_state,
+        reviewed_by: decision.reviewed_by,
+        reviewed_at: decision.reviewed_at,
+      };
+      if (decision.text !== decision.original_text) update.text = decision.text;
+
+      const { error } = await db.from(Tables.claims).update(update).eq('id', near.id);
+      if (!error) {
+        decision.used = true;
+        reviewsPreserved += 1;
+      }
+    }
+  }
+
+  // Conflicts are recomputed from scratch so a resolved contradiction does not
+  // linger on the next run.
+  await db
+    .from(Tables.claims)
+    .update({ conflict_group: null })
+    .eq('project_id', projectId)
+    .not('conflict_group', 'is', null);
 
   const { data: allClaims } = await db
     .from(Tables.claims)
-    .select('id, text, source_id, chunk_id, status')
+    .select('id, text, source_id, chunk_id, status, review_state, fingerprint')
     .eq('project_id', projectId);
   const groups = detectConflicts((allClaims ?? []) as StoredClaim[]);
   for (const group of groups) {
-    await db
-      .from(Tables.claims)
-      .update({ status: 'conflicting', conflict_group: group.groupId, confidence: 0.5 })
-      .in('id', group.claimIds);
+    for (const claimId of group.claimIds) {
+      const claim = (allClaims ?? []).find((c) => c.id === claimId);
+      const reviewed = claim ? (claim.review_state as string) !== 'pending' : false;
+      await db
+        .from(Tables.claims)
+        .update(reviewed ? { conflict_group: group.groupId } : { status: 'conflicting', conflict_group: group.groupId, confidence: 0.5 })
+        .eq('id', claimId);
+    }
   }
 
   await db.from(Tables.projects).update({ last_extracted_at: new Date().toISOString() }).eq('id', projectId);
+
+  const reviewsReset = refresh ? decisions.filter((d) => !d.used).length : 0;
 
   return {
     chunks: chunkRows.length,
@@ -346,5 +462,8 @@ export async function runExtraction(projectId: string): Promise<ExtractionSummar
     needs_review: needsReview,
     owner_gaps: ownerGaps,
     sources_failed: [...failed, ...failures],
+    refreshed: refresh,
+    reviews_preserved: reviewsPreserved,
+    reviews_reset: reviewsReset,
   } satisfies ExtractionSummary;
 }

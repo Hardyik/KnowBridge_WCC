@@ -117,7 +117,7 @@ export function requireMember(
 /** Append to the project audit trail. Never blocks the main action. */
 export async function audit(
   projectId: string,
-  actorId: string,
+  actorId: string | null,
   action: string,
   targetType: string,
   targetId: string | null,

@@ -4,15 +4,18 @@
 leaves behind into a reviewable, evidence-linked handover — with contradictions and missing
 owners shown instead of guessed — and delivers a role-scoped version to the incoming person.
 
-Fallen Crows · Round 2 build · documents-only scope.
+Fallen Crows · Round 3 build · documents plus a read-only repository connector.
 
 ---
 
 ## What it does
 
-1. **Connect** — a manager uploads authorised project documents (PDF, DOCX, TXT, MD).
+1. **Connect** — a manager uploads authorised project documents (PDF, DOCX, TXT, MD) and, as a
+   second source type, connects a public GitHub repository. The connector reads the README, open
+   and closed issues and recent commits; nothing is written back to GitHub. Every source carries a
+   confidentiality tier (public, internal, restricted).
 2. **Reconstruct** — Groq extracts atomic claims (decisions, completed/pending work, next
-   actions, owners, risks, blockers, dependencies, setup) from each chunk of each document.
+   actions, owners, risks, blockers, dependencies, setup) from each chunk of each source.
 3. **Verify** — every claim must carry a verbatim quote from its chunk. Quotes that cannot be
    found are marked `needs_review`; claims without a quote are `unsupported`; contradictions
    between documents are marked `conflicting` and both sides are kept; decisions with no owner
@@ -21,6 +24,19 @@ Fallen Crows · Round 2 build · documents-only scope.
    a note, then approves. Approval freezes the version as a snapshot.
 5. **Hand over** — the recipient signs in and sees only the sections their scope allows.
    Redacted and excluded claims never reach them. Opening and acknowledging are audited.
+6. **Deliver** — or issue an expiring signed link for someone without an account. The link carries
+   a fixed scope and the same confidentiality filter, records opens, and collects a named
+   acknowledgement; the manager sees who has not acknowledged yet and can revoke at any time.
+7. **Ask** — the AI assistant tab answers questions from the handover alone, citing the claims it
+   used. It is scoped like every other view, says so when the handover does not record an answer,
+   and never answers from general knowledge.
+
+Round 3 additions in detail: a **cross-source timeline** (claims ordered by the date a commit or
+issue states), **cross-source corroboration** (the same fact stated by a document and a commit),
+**review-preserving re-extraction** (a refresh carries verified/corrected/redacted decisions onto
+the regenerated claims), **version diff and rollback** (compare approved versions, restore an
+earlier one as a new approval), and per-source **confidentiality tiers** enforced in the scoping
+layer rather than the UI.
 
 ## Stack
 
@@ -31,6 +47,7 @@ Fallen Crows · Round 2 build · documents-only scope.
 | Data, auth | Supabase (PostgreSQL + Auth) |
 | AI | Groq API, JSON mode (`GROQ_MODEL`, default `openai/gpt-oss-120b`) |
 | Documents | `pdfjs-dist`, `mammoth`, UTF-8 text |
+| Repository | GitHub REST API, read-only, optional `GITHUB_TOKEN` for the rate limit |
 
 ## Repository layout
 
@@ -50,6 +67,10 @@ Create a project, then run [`docs/schema.sql`](docs/schema.sql) in **SQL Editor*
 all KnowBridge tables and enables RLS with no public policies: only the API's service-role key
 can read them.
 
+Already on the Round 2 schema? Run [`docs/migration-round3.sql`](docs/migration-round3.sql)
+instead. It is additive and idempotent — existing projects, claims and approved handovers are
+untouched.
+
 ### 2. Environment
 
 ```bash
@@ -58,6 +79,10 @@ cp server/.env.example server/.env
 
 Fill in `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY` (Supabase → Project
 Settings → API) and `GROQ_API_KEY` (console.groq.com → API Keys). Never commit `.env`.
+
+Optional: `GITHUB_TOKEN` (raises GitHub's anonymous 60-requests-per-hour limit and lets the
+connector read a private repository the manager can already access) and `WEB_ORIGIN` (the public
+web origin used when building delivery links; defaults to `CORS_ORIGIN`).
 
 ### 3. Install, seed, run
 
@@ -79,23 +104,35 @@ in `demo-data/documents/`, then **Run AI extraction**. The set deliberately cont
 - a credential line that should be redacted before sharing (the old sandbox key);
 - decisions whose passages name nobody, producing **Owner not confirmed** gaps.
 
-See [`docs/demo-script.md`](docs/demo-script.md) for the full sequence.
+Then open **Timeline** (dated repository activity), **Handover** (approve, compare with the previous
+version, issue a delivery link), and **AI Assistant** (ask what is still pending — the answer cites
+its claims).
+
+See [`docs/demo-script.md`](docs/demo-script.md) for the full sequence and
+[`docs/round3.md`](docs/round3.md) for what each Round 3 feature proves.
 
 ## Deployment
 
 - **API → Render**: root `server`, build `npm install && npm run build -w shared && npm run build -w server`,
   start `node server/dist/src/index.js`, health check `/healthz`. Set the same four secrets plus
-  `CORS_ORIGIN=https://<your-vercel-app>`.
+  `CORS_ORIGIN=https://<your-vercel-app>` and, ideally, `WEB_ORIGIN=https://<your-vercel-app>` so
+  delivery links point at the deployed web app. `GITHUB_TOKEN` is optional.
 - **Web → Vercel**: root `web`, build `npm install && npm run build`, output `dist`. Set
   `VITE_API_URL=https://<your-api>.onrender.com`.
 - Supabase hosts Postgres and Auth; nothing else is required.
 
 ## Known limitations
 
-- Documents only; no GitHub/task-board connectors yet (see the Round 2 report for why).
+- The repository connector is read-only and public-only unless `GITHUB_TOKEN` is set; it reads the
+  README, issues and commits, not code or pull-request diffs.
+- Cross-source corroboration only appears when two source kinds state the same fact; connecting a
+  repository about a different project shows the timeline but will not corroborate the documents.
 - Extraction inherits model judgement: categorisation varies between runs, and a quotation can
   be marked `needs_review` when the document's formatting differs from the model's copy.
 - Conflict detection is deterministic and conservative (opposing status words on overlapping
   subjects); it deliberately does not resolve conflicts.
 - Web is responsive but there is no native mobile client.
-- No email notifications; the recipient link is shared manually.
+- No email delivery: reminders are recorded in the audit trail and the link is copied for the
+  manager to resend, rather than sent by KnowBridge.
+- Restricted sources never appear in a recipient view or delivery link — by design they are
+  team-only, so a handover that depends on them needs the manager to reclassify before sharing.

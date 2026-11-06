@@ -8,6 +8,8 @@ import projectRoutes from './routes/projects.js';
 import sourceRoutes from './routes/sources.js';
 import claimRoutes from './routes/claims.js';
 import handoverRoutes from './routes/handovers.js';
+import deliveryRoutes from './routes/deliveries.js';
+import assistantRoutes from './routes/assistant.js';
 
 const app = express();
 
@@ -30,6 +32,8 @@ app.use('/api', projectRoutes);
 app.use('/api', sourceRoutes);
 app.use('/api', claimRoutes);
 app.use('/api', handoverRoutes);
+app.use('/api', deliveryRoutes);
+app.use('/api', assistantRoutes);
 
 app.use((_req, _res, next) => next(new HttpError(404, 'Not found')));
 app.use(errorHandler);

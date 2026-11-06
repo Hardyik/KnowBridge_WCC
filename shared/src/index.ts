@@ -56,6 +56,45 @@ export interface ProjectSummary extends Project {
 
 export type SourceStatus = 'ready' | 'failed';
 
+/** Where a source came from: an uploaded file or a connected repository. */
+export const SOURCE_KINDS = ['document', 'github'] as const;
+export type SourceKind = (typeof SOURCE_KINDS)[number];
+
+export const SOURCE_KIND_LABELS: Record<SourceKind, string> = {
+  document: 'Document',
+  github: 'GitHub',
+};
+
+/**
+ * Confidentiality is a per-source tier. The server, never the client, decides
+ * whether a recipient may see a claim from a source.
+ */
+export const CONFIDENTIALITY_TIERS = ['public', 'internal', 'restricted'] as const;
+export type Confidentiality = (typeof CONFIDENTIALITY_TIERS)[number];
+
+export const CONFIDENTIALITY_LABELS: Record<Confidentiality, string> = {
+  public: 'Public — any recipient scope',
+  internal: 'Internal — engineer and manager scopes',
+  restricted: 'Restricted — team only, never delivered',
+};
+
+export const CONFIDENTIALITY_DESCRIPTIONS: Record<Confidentiality, string> = {
+  public: 'Safe to hand to any incoming person.',
+  internal: 'Withheld from coordinator and general scopes.',
+  restricted: 'Never appears in a recipient view or a delivery link; only the project team sees it.',
+};
+
+/**
+ * Restricted sources are team-only by design; internal sources are hidden from
+ * the narrowest scopes. Applied to recipient views, delivery links and the
+ * assistant alike.
+ */
+export function tierVisibleToScope(tier: Confidentiality, scope: RecipientScope): boolean {
+  if (tier === 'restricted') return false;
+  if (tier === 'public') return true;
+  return scope === 'engineer' || scope === 'manager';
+}
+
 export interface ProjectSource {
   id: string;
   project_id: string;
@@ -65,6 +104,10 @@ export interface ProjectSource {
   status: SourceStatus;
   error: string | null;
   chunk_count: number;
+  kind: SourceKind;
+  external_ref: string | null;
+  confidentiality: Confidentiality;
+  last_synced_at: string | null;
   created_at: string;
 }
 
@@ -100,6 +143,12 @@ export interface ClaimEvidence {
   quote: string | null;
 }
 
+export interface ClaimCorroboration {
+  claim_id: string;
+  source_title: string;
+  source_kind: SourceKind;
+}
+
 export interface Claim {
   id: string;
   project_id: string;
@@ -115,6 +164,12 @@ export interface Claim {
   reviewed_by: string | null;
   reviewed_at: string | null;
   evidence: ClaimEvidence;
+  source_kind: SourceKind;
+  confidentiality: Confidentiality;
+  /** Date the source itself states (commit or issue date), when known. */
+  occurred_at: string | null;
+  /** Claims from a different source kind that state the same thing. */
+  corroborations: ClaimCorroboration[];
   created_at: string;
 }
 
@@ -215,6 +270,9 @@ export interface HandoverClaim {
   owner_text: string | null;
   review_state: ReviewState;
   evidence: ClaimEvidence;
+  source_kind: SourceKind;
+  confidentiality: Confidentiality;
+  occurred_at: string | null;
 }
 
 export interface HandoverVersion {
@@ -266,6 +324,117 @@ export interface ExtractionSummary {
   needs_review: number;
   owner_gaps: number;
   sources_failed: string[];
+  /** True when the run regenerated claims for passages that already had them. */
+  refreshed: boolean;
+  /** Reviewer decisions (verified, corrected, redacted, excluded) carried over. */
+  reviews_preserved: number;
+  /** Reviewer decisions that could not be matched to a new claim. */
+  reviews_reset: number;
+}
+
+// ---------------------------------------------------------------------------
+// Version comparison and rollback
+// ---------------------------------------------------------------------------
+
+export interface HandoverDiffClaim {
+  id: string;
+  category: ClaimCategory;
+  text: string;
+  evidence: ClaimEvidence;
+  source_kind: SourceKind;
+}
+
+export interface HandoverDiffChanged {
+  id: string;
+  category: ClaimCategory;
+  from_text: string;
+  to_text: string;
+  evidence: ClaimEvidence;
+}
+
+export interface HandoverDiff {
+  from: { id: string; version: number; approved_at: string | null };
+  to: { id: string; version: number; approved_at: string | null };
+  added: HandoverDiffClaim[];
+  removed: HandoverDiffClaim[];
+  changed: HandoverDiffChanged[];
+  unchanged: number;
+}
+
+// ---------------------------------------------------------------------------
+// Delivered handover: expiring signed links
+// ---------------------------------------------------------------------------
+
+export type DeliveryStatus = 'active' | 'expired' | 'revoked';
+
+export interface DeliveryAcknowledgement {
+  name: string;
+  email: string | null;
+  acknowledged_at: string;
+}
+
+export interface DeliveryLink {
+  id: string;
+  handover_id: string;
+  project_id: string;
+  scope: RecipientScope;
+  recipient_label: string | null;
+  expires_at: string;
+  revoked_at: string | null;
+  opened_at: string | null;
+  open_count: number;
+  created_at: string;
+  status: DeliveryStatus;
+  /** Full URL to hand to the recipient; only returned while the link is usable. */
+  url: string | null;
+  token: string | null;
+  acknowledgement: DeliveryAcknowledgement | null;
+  needs_reminder: boolean;
+}
+
+export interface DeliveryView {
+  delivery: {
+    scope: RecipientScope;
+    recipient_label: string | null;
+    expires_at: string;
+  };
+  handover: { id: string; version: number; approved_at: string | null; status: string };
+  project: { id: string; name: string; description: string };
+  sections: HandoverSection[];
+  hidden_claim_count: number;
+  scope_note: string;
+  acknowledged_at: string | null;
+  reviewer_note: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// AI assistant
+// ---------------------------------------------------------------------------
+
+export interface AssistantCitation {
+  claim_id: string;
+  text: string;
+  category: ClaimCategory;
+  source_title: string;
+  source_kind: SourceKind;
+  location: string;
+  quote: string | null;
+}
+
+export interface AssistantMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  citations: AssistantCitation[] | null;
+  created_at: string;
+}
+
+export interface AssistantReply {
+  message: AssistantMessage;
+  /** False when the knowledge base had no answer and the assistant said so. */
+  grounded: boolean;
+  context_claims: number;
+  hidden_by_scope: number;
 }
 
 export const SCOPE_DESCRIPTIONS: Record<RecipientScope, string> = {

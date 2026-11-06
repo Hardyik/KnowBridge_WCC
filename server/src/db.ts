@@ -18,6 +18,9 @@ export const Tables = {
   handovers: 'handovers',
   acknowledgements: 'acknowledgements',
   auditLog: 'audit_log',
+  deliveryLinks: 'delivery_links',
+  deliveryAcknowledgements: 'delivery_acknowledgements',
+  assistantMessages: 'assistant_messages',
 } as const;
 
 let service: SupabaseClient | null = null;
